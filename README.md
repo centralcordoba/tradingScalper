@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="img%20Scalper.png" alt="SMS Pro — Smart Money Scalper" width="800" />
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/Pine_Script-v6-blue?style=for-the-badge&logo=tradingview&logoColor=white" />
   <img src="https://img.shields.io/badge/Platform-TradingView-131722?style=for-the-badge&logo=tradingview&logoColor=white" />
   <img src="https://img.shields.io/badge/Type-Scalping_System-green?style=for-the-badge" />
