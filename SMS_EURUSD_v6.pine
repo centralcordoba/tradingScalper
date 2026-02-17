@@ -1,0 +1,785 @@
+//@version=6
+indicator("SMS Pro EURUSD v6", shorttitle="SMS-EUR", overlay=true, max_lines_count=200, max_labels_count=200, max_boxes_count=100)
+
+// ============================================================================
+// CONFIGURACION PRINCIPAL - OPTIMIZADO PARA EUR/USD - v6 CON FVG + RSI + MTF + MOMENTUM + BE
+// ============================================================================
+
+// EMAs
+emaFastLen = input.int(9, "EMA Rapida", minval=1, group="EMAs")
+emaSlowLen = input.int(21, "EMA Lenta", minval=1, group="EMAs")
+ema200Len = input.int(200, "EMA 200", minval=50, group="EMAs")
+showEMA200 = input.bool(true, "Mostrar EMA 200", group="EMAs")
+
+// Market Structure
+swingLen = input.int(5, "Swing Lookback", minval=2, maxval=20, group="Structure")
+showBOS = input.bool(true, "Mostrar BOS", group="Structure")
+showCHOCH = input.bool(true, "Mostrar CHoCH", group="Structure")
+
+// Order Blocks
+showOB = input.bool(true, "Mostrar Order Blocks", group="Order Blocks")
+maxOB = input.int(3, "Max Order Blocks visibles", minval=1, maxval=10, group="Order Blocks")
+
+// FVG - MEJORADO: Ahora activo como confluencia
+showFVG = input.bool(true, "Mostrar FVG", group="FVG")
+fvgMinSize = input.float(0.03, "Tamano minimo FVG %", minval=0.01, maxval=0.5, group="FVG")
+maxFVG = input.int(3, "Max FVG visibles", minval=1, maxval=10, group="FVG")
+useFVGConfluence = input.bool(true, "Usar FVG como Confluencia", group="FVG", tooltip="Suma +1 confluencia cuando precio entra en FVG")
+
+// Liquidez
+showSweeps = input.bool(true, "Mostrar Liquidity Sweeps", group="Liquidez")
+showEQHL = input.bool(false, "Mostrar Equal H/L", group="Liquidez")
+eqhLookback = input.int(15, "Lookback", minval=5, maxval=50, group="Liquidez")
+filterSweeps = input.bool(true, "Filtrar Sweeps (solo en KZ)", group="Liquidez")
+
+// Kill Zones
+showKillZones = input.bool(true, "Mostrar Kill Zones", group="Kill Zones")
+onlyTradeKZ = input.bool(true, "Solo senales en Kill Zone", group="Kill Zones")
+
+// Fibonacci
+showFib = input.bool(true, "Mostrar Fib 50%", group="Fibonacci")
+fibLookback = input.int(30, "Lookback", minval=10, maxval=100, group="Fibonacci")
+
+// Senales - ACTUALIZADO: Ahora maximo 10 confluencias
+showSignals = input.bool(true, "Mostrar Senales", group="Senales")
+minConfluence = input.int(3, "Minimo Confluencias", minval=2, maxval=9, group="Senales")
+showLabels = input.bool(true, "Mostrar Labels SL/TP", group="Senales")
+
+// ATR
+atrLen = input.int(14, "Periodo ATR", minval=5, maxval=50, group="ATR")
+atrMult = input.float(1.2, "Multiplicador SL", minval=0.5, maxval=3.0, group="ATR")
+rrRatio = input.float(2.0, "Ratio Riesgo:Beneficio", minval=1.0, maxval=5.0, group="ATR")
+useOBforSL = input.bool(true, "Usar Order Block para SL", group="ATR")
+
+// RSI FILTER (Confluencia #9)
+useRSIConfluence = input.bool(true, "Usar RSI como Confluencia", group="RSI Filter")
+rsiLen = input.int(14, "Periodo RSI", minval=5, maxval=21, group="RSI Filter")
+rsiOverbought = input.int(70, "Sobrecompra", minval=60, maxval=85, group="RSI Filter")
+rsiOversold = input.int(30, "Sobreventa", minval=15, maxval=40, group="RSI Filter")
+
+// MTF - CONFIRMACION MULTITEMPORAL (Confluencia #10)
+useMTFConfluence = input.bool(true, "Usar MTF como Confluencia", group="MTF")
+mtfTimeframe = input.timeframe("30", "Temporalidad Superior", group="MTF", tooltip="M30 recomendado para scalping M5. H1 para swing intraday.")
+mtfEmaFastLen = input.int(9, "EMA Rapida HTF", minval=1, maxval=50, group="MTF")
+mtfEmaSlowLen = input.int(21, "EMA Lenta HTF", minval=1, maxval=100, group="MTF")
+showMTFEmas = input.bool(false, "Mostrar EMAs HTF en chart", group="MTF", tooltip="Muestra las EMAs del timeframe superior como referencia")
+
+// MOMENTUM QUALITY (Calificacion de senal)
+useMomentumQuality = input.bool(true, "Evaluar Momentum de Vela", group="Momentum Quality")
+momRangeMultiplier = input.float(1.5, "Multiplicador Rango vs Promedio", minval=1.0, maxval=3.0, step=0.1, group="Momentum Quality", tooltip="Vela con rango > X veces el promedio = STRONG")
+momCloseRatio = input.float(0.7, "Cierre cerca del extremo (ratio)", minval=0.5, maxval=0.95, step=0.05, group="Momentum Quality", tooltip="0.7 = cierre en el 70% superior/inferior de la vela")
+momAvgLen = input.int(20, "Periodo promedio de rango", minval=5, maxval=50, group="Momentum Quality")
+
+// BREAK EVEN VISUAL (Niveles de referencia)
+showBELevels = input.bool(true, "Mostrar nivel Break Even (1:1)", group="BE Levels")
+beLevelExtend = input.int(20, "Barras de extension BE", minval=5, maxval=50, group="BE Levels")
+showTP2Level = input.bool(false, "Mostrar TP2 (parcial)", group="BE Levels", tooltip="Muestra nivel TP intermedio al 1:1 para cierre parcial")
+
+// SPREAD
+spreadPips = input.float(0.8, "Spread estimado (pips)", minval=0.1, maxval=3.0, group="Spread", tooltip="EUR/USD tipico: 0.5-1.5 pips")
+addSpreadToSL = input.bool(true, "Agregar spread al SL", group="Spread")
+spreadBuffer = input.float(0.3, "Buffer adicional (pips)", minval=0.0, maxval=2.0, group="Spread")
+
+// Alertas
+enableAlerts = input.bool(true, "Habilitar Alertas", group="Alertas")
+alertOnSweeps = input.bool(false, "Alertas de Sweeps", group="Alertas")
+alertOnCHoCH = input.bool(true, "Alertas de CHoCH", group="Alertas")
+alertOnBOS = input.bool(false, "Alertas de BOS", group="Alertas")
+
+// Panel
+showPanel = input.bool(true, "Mostrar Panel Info", group="Visual")
+
+// ============================================================================
+// COLORES
+// ============================================================================
+
+bullColor = color.rgb(0, 230, 118)
+bearColor = color.rgb(255, 82, 82)
+bosColor = color.rgb(0, 188, 212)
+chochColor = color.rgb(255, 152, 0)
+obBullColor = color.new(color.rgb(38, 166, 154), 80)
+obBearColor = color.new(color.rgb(239, 83, 80), 80)
+fvgBullColor = color.new(color.rgb(0, 150, 255), 80)      // Azul para FVG alcista
+fvgBearColor = color.new(color.rgb(255, 150, 0), 80)      // Naranja para FVG bajista
+
+// ============================================================================
+// CALCULOS BASE
+// ============================================================================
+
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+ema200 = ta.ema(close, ema200Len)
+atrValue = ta.atr(atrLen)
+rsiValue = ta.rsi(close, rsiLen)
+
+// MTF - Datos del timeframe superior
+mtfEmaFast = request.security(syminfo.tickerid, mtfTimeframe, ta.ema(close, mtfEmaFastLen), lookahead=barmerge.lookahead_off)
+mtfEmaSlow = request.security(syminfo.tickerid, mtfTimeframe, ta.ema(close, mtfEmaSlowLen), lookahead=barmerge.lookahead_off)
+mtfClose = request.security(syminfo.tickerid, mtfTimeframe, close, lookahead=barmerge.lookahead_off)
+mtfTrendUp = mtfEmaFast > mtfEmaSlow and mtfClose > mtfEmaSlow
+mtfTrendDown = mtfEmaFast < mtfEmaSlow and mtfClose < mtfEmaSlow
+mtfTrendName = mtfTrendUp ? "BULL" : mtfTrendDown ? "BEAR" : "MIX"
+
+// Spread en precio (EUR/USD: pips * 0.0001)
+pipValue = syminfo.mintick * 10
+totalSpreadBuffer = addSpreadToSL ? (spreadPips + spreadBuffer) * pipValue : 0
+
+trendUp = emaFast > emaSlow
+trendDown = emaFast < emaSlow
+htfTrendUp = close > ema200
+htfTrendDown = close < ema200
+
+bodySize = math.abs(close - open)
+candleRange = high - low
+upperWick = high - math.max(close, open)
+lowerWick = math.min(close, open) - low
+isBullCandle = close > open
+isBearCandle = close < open
+
+// MOMENTUM QUALITY - Detectar velas de impulso fuerte
+avgRange = ta.sma(high - low, momAvgLen)
+isMomentumCandle = candleRange > avgRange * momRangeMultiplier
+bullCloseStrength = candleRange > 0 ? (close - low) / candleRange : 0
+bearCloseStrength = candleRange > 0 ? (high - close) / candleRange : 0
+isStrongBullClose = bullCloseStrength >= momCloseRatio and isBullCandle
+isStrongBearClose = bearCloseStrength >= momCloseRatio and isBearCandle
+isStrongBullSignal = isMomentumCandle and isStrongBullClose
+isStrongBearSignal = isMomentumCandle and isStrongBearClose
+
+// ============================================================================
+// KILL ZONES
+// ============================================================================
+
+utcHour = hour(time, "UTC")
+estHour = (utcHour - 5 + 24) % 24
+
+inLondonKZ = estHour >= 2 and estHour < 5
+inNYKZ = estHour >= 7 and estHour < 10
+inNYOverlap = estHour >= 8 and estHour < 11
+inAnyKZ = inLondonKZ or inNYKZ or inNYOverlap
+
+kzBgColor = showKillZones ? (inLondonKZ ? color.new(color.blue, 93) : inNYKZ or inNYOverlap ? color.new(color.green, 93) : na) : na
+bgcolor(kzBgColor)
+
+kzName = inLondonKZ ? "LONDON" : inNYKZ ? "NEW YORK" : inNYOverlap ? "NY-OVERLAP" : "FUERA KZ"
+
+// ============================================================================
+// MARKET STRUCTURE
+// ============================================================================
+
+swingHigh = ta.pivothigh(high, swingLen, swingLen)
+swingLow = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSwingHigh = na
+var float lastSwingLow = na
+var int trendDir = 0
+
+if not na(swingHigh)
+    lastSwingHigh := swingHigh
+if not na(swingLow)
+    lastSwingLow := swingLow
+
+crossOverHigh = ta.crossover(close, nz(lastSwingHigh, high))
+crossUnderLow = ta.crossunder(close, nz(lastSwingLow, low))
+
+bos_bull = not na(lastSwingHigh) and crossOverHigh and trendDir == 1
+bos_bear = not na(lastSwingLow) and crossUnderLow and trendDir == -1
+choch_bull = not na(lastSwingHigh) and crossOverHigh and trendDir == -1
+choch_bear = not na(lastSwingLow) and crossUnderLow and trendDir == 1
+
+if choch_bull or bos_bull
+    trendDir := 1
+if choch_bear or bos_bear
+    trendDir := -1
+
+bos_bull_confirmed = showBOS and bos_bull and barstate.isconfirmed
+bos_bear_confirmed = showBOS and bos_bear and barstate.isconfirmed
+choch_bull_confirmed = showCHOCH and choch_bull and barstate.isconfirmed
+choch_bear_confirmed = showCHOCH and choch_bear and barstate.isconfirmed
+
+if bos_bull_confirmed
+    label.new(bar_index, low, "BOS", style=label.style_label_up, color=bosColor, textcolor=color.white, size=size.tiny)
+if bos_bear_confirmed
+    label.new(bar_index, high, "BOS", style=label.style_label_down, color=bosColor, textcolor=color.white, size=size.tiny)
+if choch_bull_confirmed
+    label.new(bar_index, low, "CHoCH", style=label.style_label_up, color=chochColor, textcolor=color.white, size=size.small)
+if choch_bear_confirmed
+    label.new(bar_index, high, "CHoCH", style=label.style_label_down, color=chochColor, textcolor=color.white, size=size.small)
+
+// ============================================================================
+// ORDER BLOCKS
+// ============================================================================
+
+var array<box> bullOBBoxes = array.new<box>()
+var array<box> bearOBBoxes = array.new<box>()
+var array<float> bullOBTops = array.new<float>()
+var array<float> bullOBBottoms = array.new<float>()
+var array<float> bearOBTops = array.new<float>()
+var array<float> bearOBBottoms = array.new<float>()
+
+bullOB = isBearCandle[1] and isBullCandle and close > high[1] and (close - open) > atrValue * 0.3
+bearOB = isBullCandle[1] and isBearCandle and close < low[1] and (open - close) > atrValue * 0.3
+
+if showOB and bullOB and barstate.isconfirmed
+    if array.size(bullOBBoxes) >= maxOB
+        oldBox = array.shift(bullOBBoxes)
+        box.delete(oldBox)
+        array.shift(bullOBTops)
+        array.shift(bullOBBottoms)
+    newBox = box.new(bar_index - 1, high[1], bar_index + 30, low[1], bgcolor=obBullColor, border_color=bullColor, border_width=1)
+    array.push(bullOBBoxes, newBox)
+    array.push(bullOBTops, high[1])
+    array.push(bullOBBottoms, low[1])
+
+if showOB and bearOB and barstate.isconfirmed
+    if array.size(bearOBBoxes) >= maxOB
+        oldBox = array.shift(bearOBBoxes)
+        box.delete(oldBox)
+        array.shift(bearOBTops)
+        array.shift(bearOBBottoms)
+    newBox = box.new(bar_index - 1, high[1], bar_index + 30, low[1], bgcolor=obBearColor, border_color=bearColor, border_width=1)
+    array.push(bearOBBoxes, newBox)
+    array.push(bearOBTops, high[1])
+    array.push(bearOBBottoms, low[1])
+
+// Mitigar OB
+if array.size(bullOBBoxes) > 0
+    for i = array.size(bullOBBoxes) - 1 to 0
+        if i < array.size(bullOBBottoms) and close < array.get(bullOBBottoms, i)
+            box.delete(array.get(bullOBBoxes, i))
+            array.remove(bullOBBoxes, i)
+            array.remove(bullOBTops, i)
+            array.remove(bullOBBottoms, i)
+
+if array.size(bearOBBoxes) > 0
+    for i = array.size(bearOBBoxes) - 1 to 0
+        if i < array.size(bearOBTops) and close > array.get(bearOBTops, i)
+            box.delete(array.get(bearOBBoxes, i))
+            array.remove(bearOBBoxes, i)
+            array.remove(bearOBTops, i)
+            array.remove(bearOBBottoms, i)
+
+getNearestBullOBBottom() =>
+    result = close - (atrValue * atrMult)
+    if array.size(bullOBBottoms) > 0
+        for i = 0 to array.size(bullOBBottoms) - 1
+            obBottom = array.get(bullOBBottoms, i)
+            obTop = array.get(bullOBTops, i)
+            if close >= obBottom and close <= obTop * 1.001
+                result := obBottom
+                break
+    result
+
+getNearestBearOBTop() =>
+    result = close + (atrValue * atrMult)
+    if array.size(bearOBTops) > 0
+        for i = 0 to array.size(bearOBTops) - 1
+            obTop = array.get(bearOBTops, i)
+            obBottom = array.get(bearOBBottoms, i)
+            if close <= obTop and close >= obBottom * 0.999
+                result := obTop
+                break
+    result
+
+inBullOB() =>
+    result = false
+    if array.size(bullOBBoxes) > 0
+        for i = 0 to array.size(bullOBBoxes) - 1
+            if i < array.size(bullOBTops) and i < array.size(bullOBBottoms)
+                if close <= array.get(bullOBTops, i) and close >= array.get(bullOBBottoms, i)
+                    result := true
+    result
+
+inBearOB() =>
+    result = false
+    if array.size(bearOBBoxes) > 0
+        for i = 0 to array.size(bearOBBoxes) - 1
+            if i < array.size(bearOBTops) and i < array.size(bearOBBottoms)
+                if close <= array.get(bearOBTops, i) and close >= array.get(bearOBBottoms, i)
+                    result := true
+    result
+
+// ============================================================================
+// FVG - MEJORADO: CON DETECCION DE PRECIO DENTRO + CONFLUENCIA
+// ============================================================================
+
+var array<box> bullFVGBoxes = array.new<box>()
+var array<box> bearFVGBoxes = array.new<box>()
+var array<float> bullFVGTops = array.new<float>()
+var array<float> bullFVGBottoms = array.new<float>()
+var array<float> bearFVGTops = array.new<float>()
+var array<float> bearFVGBottoms = array.new<float>()
+
+fvgMinTicks = close * (fvgMinSize / 100)
+
+// Bullish FVG: Gap entre high de vela 3 y low de vela 1 (precio subio rapido)
+bullFVG = low > high[2] and (low - high[2]) > fvgMinTicks
+// Bearish FVG: Gap entre low de vela 3 y high de vela 1 (precio bajo rapido)
+bearFVG = high < low[2] and (low[2] - high) > fvgMinTicks
+
+if showFVG and bullFVG and barstate.isconfirmed
+    if array.size(bullFVGBoxes) >= maxFVG
+        oldBox = array.shift(bullFVGBoxes)
+        box.delete(oldBox)
+        array.shift(bullFVGTops)
+        array.shift(bullFVGBottoms)
+    // Bullish FVG: Bottom = high[2], Top = low (el gap)
+    fvgBottom = high[2]
+    fvgTop = low
+    newBox = box.new(bar_index - 2, fvgTop, bar_index + 30, fvgBottom, bgcolor=fvgBullColor, border_color=color.new(color.blue, 50), border_width=1)
+    array.push(bullFVGBoxes, newBox)
+    array.push(bullFVGTops, fvgTop)
+    array.push(bullFVGBottoms, fvgBottom)
+
+if showFVG and bearFVG and barstate.isconfirmed
+    if array.size(bearFVGBoxes) >= maxFVG
+        oldBox = array.shift(bearFVGBoxes)
+        box.delete(oldBox)
+        array.shift(bearFVGTops)
+        array.shift(bearFVGBottoms)
+    // Bearish FVG: Bottom = high, Top = low[2] (el gap)
+    fvgBottom = high
+    fvgTop = low[2]
+    newBox = box.new(bar_index - 2, fvgTop, bar_index + 30, fvgBottom, bgcolor=fvgBearColor, border_color=color.new(color.orange, 50), border_width=1)
+    array.push(bearFVGBoxes, newBox)
+    array.push(bearFVGTops, fvgTop)
+    array.push(bearFVGBottoms, fvgBottom)
+
+// Mitigar FVG cuando el precio lo llena completamente
+if array.size(bullFVGBoxes) > 0
+    for i = array.size(bullFVGBoxes) - 1 to 0
+        if i < array.size(bullFVGBottoms) and low <= array.get(bullFVGBottoms, i)
+            box.delete(array.get(bullFVGBoxes, i))
+            array.remove(bullFVGBoxes, i)
+            array.remove(bullFVGTops, i)
+            array.remove(bullFVGBottoms, i)
+
+if array.size(bearFVGBoxes) > 0
+    for i = array.size(bearFVGBoxes) - 1 to 0
+        if i < array.size(bearFVGTops) and high >= array.get(bearFVGTops, i)
+            box.delete(array.get(bearFVGBoxes, i))
+            array.remove(bearFVGBoxes, i)
+            array.remove(bearFVGTops, i)
+            array.remove(bearFVGBottoms, i)
+
+// NUEVO: Funcion para detectar si precio esta dentro de un FVG alcista
+inBullFVG() =>
+    result = false
+    if array.size(bullFVGTops) > 0
+        for i = 0 to math.min(array.size(bullFVGTops) - 1, maxFVG - 1)
+            fvgTop = array.get(bullFVGTops, i)
+            fvgBottom = array.get(bullFVGBottoms, i)
+            // Precio entra en el FVG (toca o penetra)
+            if low <= fvgTop and low >= fvgBottom
+                result := true
+                break
+    result
+
+// NUEVO: Funcion para detectar si precio esta dentro de un FVG bajista
+inBearFVG() =>
+    result = false
+    if array.size(bearFVGTops) > 0
+        for i = 0 to math.min(array.size(bearFVGTops) - 1, maxFVG - 1)
+            fvgTop = array.get(bearFVGTops, i)
+            fvgBottom = array.get(bearFVGBottoms, i)
+            // Precio entra en el FVG (toca o penetra)
+            if high >= fvgBottom and high <= fvgTop
+                result := true
+                break
+    result
+
+// ============================================================================
+// LIQUIDITY SWEEPS
+// ============================================================================
+
+recentHigh = ta.highest(high, eqhLookback)
+recentLow = ta.lowest(low, eqhLookback)
+
+liquiditySweepHighRaw = high > recentHigh[1] and close < recentHigh[1]
+liquiditySweepLowRaw = low < recentLow[1] and close > recentLow[1]
+
+liquiditySweepHigh = filterSweeps ? (liquiditySweepHighRaw and inAnyKZ) : liquiditySweepHighRaw
+liquiditySweepLow = filterSweeps ? (liquiditySweepLowRaw and inAnyKZ) : liquiditySweepLowRaw
+
+showSweepHighLabel = showSweeps and liquiditySweepHigh and barstate.isconfirmed
+showSweepLowLabel = showSweeps and liquiditySweepLow and barstate.isconfirmed
+
+if showSweepHighLabel
+    label.new(bar_index, high, "SW", style=label.style_label_down, color=color.new(bearColor, 30), textcolor=color.white, size=size.tiny)
+
+if showSweepLowLabel
+    label.new(bar_index, low, "SW", style=label.style_label_up, color=color.new(bullColor, 30), textcolor=color.white, size=size.tiny)
+
+// Equal H/L
+equalHighs() =>
+    threshold = close * 0.0002
+    count = 0
+    for i = 1 to eqhLookback
+        if math.abs(high - high[i]) < threshold
+            count += 1
+    count >= 3
+
+equalLows() =>
+    threshold = close * 0.0002
+    count = 0
+    for i = 1 to eqhLookback
+        if math.abs(low - low[i]) < threshold
+            count += 1
+    count >= 3
+
+hasEqualHighs = equalHighs()
+hasEqualLows = equalLows()
+
+if showEQHL and hasEqualHighs and barstate.isconfirmed
+    line.new(bar_index - eqhLookback, high, bar_index, high, color=color.new(color.purple, 50), style=line.style_dotted, width=1)
+
+if showEQHL and hasEqualLows and barstate.isconfirmed
+    line.new(bar_index - eqhLookback, low, bar_index, low, color=color.new(color.purple, 50), style=line.style_dotted, width=1)
+
+// ============================================================================
+// FIBONACCI
+// ============================================================================
+
+fibHigh = ta.highest(high, fibLookback)
+fibLow = ta.lowest(low, fibLookback)
+fibRange = fibHigh - fibLow
+fib500 = fibHigh - fibRange * 0.500
+fib618 = fibHigh - fibRange * 0.618
+
+inDiscount = close < fib500
+inPremium = close > fib500
+
+var line fib500Line = na
+if showFib and barstate.islast
+    line.delete(fib500Line)
+    fib500Line := line.new(bar_index - fibLookback, fib500, bar_index + 5, fib500, color=color.new(color.white, 50), style=line.style_dashed, width=1)
+
+zonaName = inDiscount ? "DISCOUNT" : "PREMIUM"
+
+// ============================================================================
+// PATRONES DE VELA
+// ============================================================================
+
+bullRejection = lowerWick > bodySize * 1.5 and lowerWick > upperWick * 2 and bodySize > 0
+bearRejection = upperWick > bodySize * 1.5 and upperWick > lowerWick * 2 and bodySize > 0
+bullEngulfing = isBullCandle and isBearCandle[1] and close > open[1] and open <= close[1]
+bearEngulfing = isBearCandle and isBullCandle[1] and close < open[1] and open >= close[1]
+bullContinuation = close > high[1] or bullEngulfing
+bearContinuation = close < low[1] or bearEngulfing
+
+// ============================================================================
+// SISTEMA DE CONFLUENCIAS - ACTUALIZADO: 10 CONFLUENCIAS (con FVG + RSI)
+// ============================================================================
+
+isInBullOB = inBullOB()
+isInBearOB = inBearOB()
+// NUEVO: Detectar si esta en FVG
+isInBullFVG = inBullFVG()
+isInBearFVG = inBearFVG()
+
+// Confluencias LONG (max 10)
+confLong = 0
+confLong := confLong + (trendUp ? 1 : 0)                                          // 1. Tendencia corto plazo
+confLong := confLong + (htfTrendUp ? 1 : 0)                                        // 2. Tendencia largo plazo
+confLong := confLong + (isInBullOB ? 1 : 0)                                        // 3. Order Block
+confLong := confLong + (inDiscount ? 1 : 0)                                        // 4. Zona Fib
+confLong := confLong + (bullRejection or bullEngulfing ? 1 : 0)                    // 5. Patron de vela
+confLong := confLong + (liquiditySweepLow[1] or liquiditySweepLow[2] ? 1 : 0)      // 6. Liquidity Sweep
+confLong := confLong + (choch_bull[1] or choch_bull[2] or bos_bull[1] ? 1 : 0)     // 7. Estructura
+confLong := confLong + (useFVGConfluence and isInBullFVG ? 1 : 0)                  // 8. FVG (NUEVO)
+confLong := confLong + (useRSIConfluence and rsiValue > rsiOversold and rsiValue < rsiOverbought ? 1 : 0)  // 9. RSI Filter
+confLong := confLong + (useMTFConfluence and mtfTrendUp ? 1 : 0)                                          // 10. MTF Trend
+
+// Confluencias SHORT (max 10)
+confShort = 0
+confShort := confShort + (trendDown ? 1 : 0)                                        // 1. Tendencia corto plazo
+confShort := confShort + (htfTrendDown ? 1 : 0)                                     // 2. Tendencia largo plazo
+confShort := confShort + (isInBearOB ? 1 : 0)                                       // 3. Order Block
+confShort := confShort + (inPremium ? 1 : 0)                                        // 4. Zona Fib
+confShort := confShort + (bearRejection or bearEngulfing ? 1 : 0)                   // 5. Patron de vela
+confShort := confShort + (liquiditySweepHigh[1] or liquiditySweepHigh[2] ? 1 : 0)   // 6. Liquidity Sweep
+confShort := confShort + (choch_bear[1] or choch_bear[2] or bos_bear[1] ? 1 : 0)    // 7. Estructura
+confShort := confShort + (useFVGConfluence and isInBearFVG ? 1 : 0)                 // 8. FVG (NUEVO)
+confShort := confShort + (useRSIConfluence and rsiValue < rsiOverbought and rsiValue > rsiOversold ? 1 : 0)  // 9. RSI Filter
+confShort := confShort + (useMTFConfluence and mtfTrendDown ? 1 : 0)                                        // 10. MTF Trend
+
+trendName = trendUp and htfTrendUp ? "BULL" : trendDown and htfTrendDown ? "BEAR" : "MIX"
+
+// ============================================================================
+// SENALES
+// ============================================================================
+
+kzFilter = onlyTradeKZ ? inAnyKZ : true
+
+longCondition = confLong >= minConfluence and bullContinuation and kzFilter and barstate.isconfirmed
+shortCondition = confShort >= minConfluence and bearContinuation and kzFilter and barstate.isconfirmed
+
+var bool lastSignalLong = false
+var bool lastSignalShort = false
+var int lastSignalBar = 0
+
+if choch_bull or choch_bear
+    lastSignalLong := false
+    lastSignalShort := false
+
+longSignal = longCondition and not lastSignalLong and (bar_index - lastSignalBar > 10)
+shortSignal = shortCondition and not lastSignalShort and (bar_index - lastSignalBar > 10)
+
+if longSignal
+    lastSignalLong := true
+    lastSignalShort := false
+    lastSignalBar := bar_index
+
+if shortSignal
+    lastSignalShort := true
+    lastSignalLong := false
+    lastSignalBar := bar_index
+
+// ============================================================================
+// VISUALIZACION
+// ============================================================================
+
+plot(emaFast, "EMA 9", color=bullColor, linewidth=2)
+plot(emaSlow, "EMA 21", color=bearColor, linewidth=2)
+plot(showEMA200 ? ema200 : na, "EMA 200", color=color.new(color.white, 60), linewidth=1)
+plot(showMTFEmas ? mtfEmaFast : na, "MTF EMA Fast", color=color.new(color.yellow, 40), linewidth=1, style=plot.style_stepline)
+plot(showMTFEmas ? mtfEmaSlow : na, "MTF EMA Slow", color=color.new(color.orange, 40), linewidth=1, style=plot.style_stepline)
+
+plotshape(showSignals and longSignal, title="LONG", style=shape.triangleup, location=location.belowbar, color=bullColor, size=size.normal)
+plotshape(showSignals and shortSignal, title="SHORT", style=shape.triangledown, location=location.abovebar, color=bearColor, size=size.normal)
+
+// Labels con SL/TP + Momentum Quality + BE Level
+if showSignals and showLabels and longSignal
+    slBase = useOBforSL ? getNearestBullOBBottom() : close - (atrValue * atrMult)
+    slPrice = slBase - totalSpreadBuffer
+    riskAmount = close - slPrice
+    tpPrice = close + (riskAmount * rrRatio)
+    slPips = (close - slPrice) / pipValue
+    tpPips = (tpPrice - close) / pipValue
+    slType = useOBforSL and isInBullOB ? "OB" : "ATR"
+    fvgTxt = isInBullFVG ? " +FVG" : ""
+    momTxt = useMomentumQuality and isStrongBullSignal ? " ⚡STRONG" : ""
+    bePrice = close + riskAmount
+    bePips = riskAmount / pipValue
+    
+    label.new(bar_index, low, 
+      "LONG " + str.tostring(confLong) + "/10" + fvgTxt + momTxt + "\n" +
+      "SL[" + slType + "]: " + str.tostring(slPrice, "#.#####") + " (" + str.tostring(slPips, "#.#") + "p)\n" +
+      "BE: " + str.tostring(bePrice, "#.#####") + " (" + str.tostring(bePips, "#.#") + "p)\n" +
+      "TP: " + str.tostring(tpPrice, "#.#####") + " (" + str.tostring(tpPips, "#.#") + "p)", 
+      style=label.style_label_up, color=useMomentumQuality and isStrongBullSignal ? color.new(color.rgb(0, 255, 140), 0) : color.new(bullColor, 10), textcolor=color.white, size=size.small)
+    
+    if showBELevels
+        line.new(bar_index, bePrice, bar_index + beLevelExtend, bePrice, color=color.new(color.yellow, 30), style=line.style_dashed, width=1)
+        label.new(bar_index + beLevelExtend, bePrice, "BE 1:1", color=color.new(color.yellow, 60), textcolor=color.white, size=size.tiny, style=label.style_label_left)
+    if showTP2Level
+        tp2Price = close + riskAmount
+        line.new(bar_index, tp2Price, bar_index + beLevelExtend, tp2Price, color=color.new(color.aqua, 40), style=line.style_dotted, width=1)
+    if showBELevels
+        line.new(bar_index, slPrice, bar_index + beLevelExtend, slPrice, color=color.new(bearColor, 30), style=line.style_dashed, width=1)
+        line.new(bar_index, tpPrice, bar_index + beLevelExtend, tpPrice, color=color.new(bullColor, 30), style=line.style_dashed, width=1)
+
+if showSignals and showLabels and shortSignal
+    slBase = useOBforSL ? getNearestBearOBTop() : close + (atrValue * atrMult)
+    slPrice = slBase + totalSpreadBuffer
+    riskAmount = slPrice - close
+    tpPrice = close - (riskAmount * rrRatio)
+    slPips = (slPrice - close) / pipValue
+    tpPips = (close - tpPrice) / pipValue
+    slType = useOBforSL and isInBearOB ? "OB" : "ATR"
+    fvgTxt = isInBearFVG ? " +FVG" : ""
+    momTxt = useMomentumQuality and isStrongBearSignal ? " ⚡STRONG" : ""
+    bePrice = close - riskAmount
+    bePips = riskAmount / pipValue
+    
+    label.new(bar_index, high, 
+      "SHORT " + str.tostring(confShort) + "/10" + fvgTxt + momTxt + "\n" +
+      "SL[" + slType + "]: " + str.tostring(slPrice, "#.#####") + " (" + str.tostring(slPips, "#.#") + "p)\n" +
+      "BE: " + str.tostring(bePrice, "#.#####") + " (" + str.tostring(bePips, "#.#") + "p)\n" +
+      "TP: " + str.tostring(tpPrice, "#.#####") + " (" + str.tostring(tpPips, "#.#") + "p)", 
+      style=label.style_label_down, color=useMomentumQuality and isStrongBearSignal ? color.new(color.rgb(255, 50, 50), 0) : color.new(bearColor, 10), textcolor=color.white, size=size.small)
+    
+    if showBELevels
+        line.new(bar_index, bePrice, bar_index + beLevelExtend, bePrice, color=color.new(color.yellow, 30), style=line.style_dashed, width=1)
+        label.new(bar_index + beLevelExtend, bePrice, "BE 1:1", color=color.new(color.yellow, 60), textcolor=color.white, size=size.tiny, style=label.style_label_left)
+    if showTP2Level
+        tp2Price = close - riskAmount
+        line.new(bar_index, tp2Price, bar_index + beLevelExtend, tp2Price, color=color.new(color.aqua, 40), style=line.style_dotted, width=1)
+    if showBELevels
+        line.new(bar_index, slPrice, bar_index + beLevelExtend, slPrice, color=color.new(bearColor, 30), style=line.style_dashed, width=1)
+        line.new(bar_index, tpPrice, bar_index + beLevelExtend, tpPrice, color=color.new(bullColor, 30), style=line.style_dashed, width=1)
+
+// ============================================================================
+// PANEL INFORMATIVO - ACTUALIZADO: Ahora muestra FVG
+// ============================================================================
+
+var table panel = table.new(position.top_right, 2, 19, bgcolor=color.new(color.black, 85), border_width=1, border_color=color.gray)
+
+if showPanel and barstate.islast
+    trendTxt = trendUp and htfTrendUp ? "BULL" : trendDown and htfTrendDown ? "BEAR" : "MIX"
+    trendCol = trendUp and htfTrendUp ? bullColor : trendDown and htfTrendDown ? bearColor : color.yellow
+    
+    kzTxt = inLondonKZ ? "LONDON" : inNYKZ ? "NY" : inNYOverlap ? "NY-OVL" : "-"
+    kzCol = inAnyKZ ? color.lime : color.gray
+    
+    zonaTxt = inDiscount ? "DISCOUNT" : "PREMIUM"
+    zonaCol = inDiscount ? bullColor : bearColor
+    
+    // NUEVO: Texto para FVG
+    fvgTxt = isInBullFVG ? "BULL" : isInBearFVG ? "BEAR" : "-"
+    fvgCol = isInBullFVG ? color.rgb(0, 150, 255) : isInBearFVG ? color.rgb(255, 150, 0) : color.gray
+    
+    table.cell(panel, 0, 0, "SMS-EUR v6", text_color=color.rgb(0, 150, 255), text_size=size.small)
+    table.cell(panel, 1, 0, "PRO", text_color=color.rgb(0, 150, 255), text_size=size.small)
+    
+    table.cell(panel, 0, 1, "Trend", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 1, trendTxt, text_color=trendCol, text_size=size.tiny)
+    
+    mtfCol = mtfTrendUp ? bullColor : mtfTrendDown ? bearColor : color.yellow
+    table.cell(panel, 0, 2, "MTF " + mtfTimeframe, text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 2, mtfTrendName, text_color=mtfCol, text_size=size.tiny)
+    
+    table.cell(panel, 0, 3, "KZ", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 3, kzTxt, text_color=kzCol, text_size=size.tiny)
+    
+    table.cell(panel, 0, 4, "Zona", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 4, zonaTxt, text_color=zonaCol, text_size=size.tiny)
+    
+    table.cell(panel, 0, 5, "ATR", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 5, str.tostring(atrValue / pipValue, "#.#") + "p", text_color=color.orange, text_size=size.tiny)
+    
+    table.cell(panel, 0, 6, "OB", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 6, isInBullOB ? "BULL" : isInBearOB ? "BEAR" : "-", text_color=isInBullOB ? bullColor : isInBearOB ? bearColor : color.gray, text_size=size.tiny)
+    
+    table.cell(panel, 0, 7, "FVG", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 7, fvgTxt, text_color=fvgCol, text_size=size.tiny)
+    
+    rsiTxt = rsiValue < rsiOversold ? "OVERSOLD" : rsiValue > rsiOverbought ? "OVERBOUGHT" : str.tostring(rsiValue, "#.0")
+    rsiCol = rsiValue < rsiOversold ? bullColor : rsiValue > rsiOverbought ? bearColor : color.white
+    table.cell(panel, 0, 8, "RSI", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 8, rsiTxt, text_color=rsiCol, text_size=size.tiny)
+    
+    table.cell(panel, 0, 9, "L-Conf", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 9, str.tostring(confLong) + "/10", text_color=confLong >= minConfluence ? bullColor : color.gray, text_size=size.tiny)
+    
+    table.cell(panel, 0, 10, "S-Conf", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 10, str.tostring(confShort) + "/10", text_color=confShort >= minConfluence ? bearColor : color.gray, text_size=size.tiny)
+    
+    table.cell(panel, 0, 11, "Spread", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 11, str.tostring(spreadPips, "#.#") + "p", text_color=color.orange, text_size=size.tiny)
+    
+    table.cell(panel, 0, 12, "SL Mode", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 12, useOBforSL ? "OB+Spread" : "ATR", text_color=color.aqua, text_size=size.tiny)
+    
+    table.cell(panel, 0, 13, "Alertas", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 13, enableAlerts ? "ON" : "OFF", text_color=enableAlerts ? color.lime : color.gray, text_size=size.tiny)
+    
+    table.cell(panel, 0, 14, "FVG Conf", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 14, useFVGConfluence ? "ON" : "OFF", text_color=useFVGConfluence ? color.lime : color.gray, text_size=size.tiny)
+    
+    table.cell(panel, 0, 15, "RSI Conf", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 15, useRSIConfluence ? "ON" : "OFF", text_color=useRSIConfluence ? color.lime : color.gray, text_size=size.tiny)
+    
+    table.cell(panel, 0, 16, "MTF Conf", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 16, useMTFConfluence ? "ON (" + mtfTimeframe + ")" : "OFF", text_color=useMTFConfluence ? color.lime : color.gray, text_size=size.tiny)
+    
+    momTxt = isStrongBullSignal ? "⚡BULL" : isStrongBearSignal ? "⚡BEAR" : isMomentumCandle ? "ACTIVE" : "-"
+    momCol = isStrongBullSignal ? bullColor : isStrongBearSignal ? bearColor : isMomentumCandle ? color.yellow : color.gray
+    table.cell(panel, 0, 17, "Momentum", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 17, momTxt, text_color=momCol, text_size=size.tiny)
+    
+    table.cell(panel, 0, 18, "BE Level", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 18, showBELevels ? "ON" : "OFF", text_color=showBELevels ? color.lime : color.gray, text_size=size.tiny)
+
+// ============================================================================
+// ALERTAS DINAMICAS
+// ============================================================================
+
+slLongCalc = useOBforSL ? getNearestBullOBBottom() - totalSpreadBuffer : close - (atrValue * atrMult) - totalSpreadBuffer
+tpLongCalc = close + ((close - slLongCalc) * rrRatio)
+slShortCalc = useOBforSL ? getNearestBearOBTop() + totalSpreadBuffer : close + (atrValue * atrMult) + totalSpreadBuffer
+tpShortCalc = close - ((slShortCalc - close) * rrRatio)
+
+slLongPips = (close - slLongCalc) / pipValue
+tpLongPips = (tpLongCalc - close) / pipValue
+slShortPips = (slShortCalc - close) / pipValue
+tpShortPips = (close - tpShortCalc) / pipValue
+
+fvgLongTxt = isInBullFVG ? "✅" : "❌"
+fvgShortTxt = isInBearFVG ? "✅" : "❌"
+
+beLongCalc = close + (close - slLongCalc)
+beShortCalc = close - (slShortCalc - close)
+beLongPips = (beLongCalc - close) / pipValue
+beShortPips = (close - beShortCalc) / pipValue
+momLongTxt = isStrongBullSignal ? "⚡STRONG" : "NORMAL"
+momShortTxt = isStrongBearSignal ? "⚡STRONG" : "NORMAL"
+
+longMessage = "🟢 LONG EURUSD\n" +
+     "━━━━━━━━━━━━━━━\n" +
+     "📍 Entrada: " + str.tostring(close, "#.#####") + "\n" +
+     "🛑 SL: " + str.tostring(slLongCalc, "#.#####") + " (" + str.tostring(slLongPips, "#.#") + "p)\n" +
+     "🔰 BE 1:1: " + str.tostring(beLongCalc, "#.#####") + " (" + str.tostring(beLongPips, "#.#") + "p)\n" +
+     "🎯 TP: " + str.tostring(tpLongCalc, "#.#####") + " (" + str.tostring(tpLongPips, "#.#") + "p)\n" +
+     "━━━━━━━━━━━━━━━\n" +
+     "📊 Confluencias: " + str.tostring(confLong) + "/10\n" +
+     "💪 Momentum: " + momLongTxt + "\n" +
+     "📦 FVG: " + fvgLongTxt + "\n" +
+     "📉 RSI: " + str.tostring(rsiValue, "#.0") + "\n" +
+     "⏰ Kill Zone: " + kzName + "\n" +
+     "📈 Tendencia: " + trendName + "\n" +
+     "🔄 MTF " + mtfTimeframe + ": " + mtfTrendName + "\n" +
+     "🎚️ Zona: " + zonaName
+
+shortMessage = "🔴 SHORT EURUSD\n" +
+     "━━━━━━━━━━━━━━━\n" +
+     "📍 Entrada: " + str.tostring(close, "#.#####") + "\n" +
+     "🛑 SL: " + str.tostring(slShortCalc, "#.#####") + " (" + str.tostring(slShortPips, "#.#") + "p)\n" +
+     "🔰 BE 1:1: " + str.tostring(beShortCalc, "#.#####") + " (" + str.tostring(beShortPips, "#.#") + "p)\n" +
+     "🎯 TP: " + str.tostring(tpShortCalc, "#.#####") + " (" + str.tostring(tpShortPips, "#.#") + "p)\n" +
+     "━━━━━━━━━━━━━━━\n" +
+     "📊 Confluencias: " + str.tostring(confShort) + "/10\n" +
+     "💪 Momentum: " + momShortTxt + "\n" +
+     "📦 FVG: " + fvgShortTxt + "\n" +
+     "📉 RSI: " + str.tostring(rsiValue, "#.0") + "\n" +
+     "⏰ Kill Zone: " + kzName + "\n" +
+     "📈 Tendencia: " + trendName + "\n" +
+     "🔄 MTF " + mtfTimeframe + ": " + mtfTrendName + "\n" +
+     "🎚️ Zona: " + zonaName
+
+if enableAlerts and longSignal
+    alert(longMessage, alert.freq_once_per_bar_close)
+
+if enableAlerts and shortSignal
+    alert(shortMessage, alert.freq_once_per_bar_close)
+
+if enableAlerts and alertOnCHoCH and choch_bull_confirmed
+    alert("⚡ CHoCH ALCISTA EURUSD @ " + str.tostring(close, "#.#####") + " | KZ: " + kzName, alert.freq_once_per_bar_close)
+
+if enableAlerts and alertOnCHoCH and choch_bear_confirmed
+    alert("⚡ CHoCH BAJISTA EURUSD @ " + str.tostring(close, "#.#####") + " | KZ: " + kzName, alert.freq_once_per_bar_close)
+
+if enableAlerts and alertOnBOS and bos_bull_confirmed
+    alert("📈 BOS ALCISTA EURUSD @ " + str.tostring(close, "#.#####") + " | KZ: " + kzName, alert.freq_once_per_bar_close)
+
+if enableAlerts and alertOnBOS and bos_bear_confirmed
+    alert("📉 BOS BAJISTA EURUSD @ " + str.tostring(close, "#.#####") + " | KZ: " + kzName, alert.freq_once_per_bar_close)
+
+if enableAlerts and alertOnSweeps and showSweepHighLabel
+    alert("💧 SWEEP HIGHS EURUSD @ " + str.tostring(close, "#.#####") + " | KZ: " + kzName, alert.freq_once_per_bar_close)
+
+if enableAlerts and alertOnSweeps and showSweepLowLabel
+    alert("💧 SWEEP LOWS EURUSD @ " + str.tostring(close, "#.#####") + " | KZ: " + kzName, alert.freq_once_per_bar_close)
+
+// ============================================================================
+// ALERTCONDITIONS
+// ============================================================================
+
+alertcondition(longSignal, title="LONG Signal", message="LONG EURUSD")
+alertcondition(shortSignal, title="SHORT Signal", message="SHORT EURUSD")
+alertcondition(choch_bull_confirmed, title="CHoCH BULL", message="CHoCH Alcista EURUSD")
+alertcondition(choch_bear_confirmed, title="CHoCH BEAR", message="CHoCH Bajista EURUSD")
+alertcondition(bos_bull_confirmed, title="BOS BULL", message="BOS Alcista EURUSD")
+alertcondition(bos_bear_confirmed, title="BOS BEAR", message="BOS Bajista EURUSD")
+alertcondition(showSweepHighLabel, title="SWEEP HIGH", message="Sweep Highs EURUSD")
+alertcondition(showSweepLowLabel, title="SWEEP LOW", message="Sweep Lows EURUSD")
