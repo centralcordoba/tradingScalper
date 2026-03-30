@@ -1,0 +1,382 @@
+//@version=6
+indicator("SMS Bias EURUSD M30 v1.2", shorttitle="SMS-BIAS EUR M30", overlay=true, max_lines_count=100, max_labels_count=50, max_boxes_count=20)
+
+// ============================================================================
+// SMS BIAS M30 v1.1 — SESGO DEL DÍA
+// ============================================================================
+// FIX v1.1:
+// ✅ Cooldown entre etiquetas — no repite el mismo patrón en barras seguidas
+// ✅ Trigger en flanco — detecta solo cuando el patrón APARECE, no mientras existe
+// ✅ Max 3 etiquetas por patrón — limpieza visual
+// ✅ Doble T/S más estricto — exige distancia mínima real entre picos
+//
+// USO: Abrir en M30 a las 14:45 CET.
+// Panel dice el sesgo → confirmar con SMS v8.1 en M5 a las 15:00 CET.
+// ============================================================================
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+showWedge      = input.bool(true, "Mostrar Cuñas", group="Cuñas")
+wedgeLookback  = input.int(16, "Lookback Cuña (barras)", minval=10, maxval=50, group="Cuñas", tooltip="EUR: 16 barras = 8 horas en M30. XAU usaba 20.")
+wedgeCooldown  = input.int(8, "Cooldown Cuña (barras)", minval=5, maxval=30, group="Cuñas", tooltip="Barras mínimas entre dos detecciones del mismo patron")
+
+showDouble     = input.bool(true, "Mostrar Doble T/S", group="Doble T/S")
+dblLookback    = input.int(35, "Lookback Doble T/S (barras)", minval=15, maxval=80, group="Doble T/S", tooltip="EUR: 35 barras = ~17 horas en M30")
+dblTolerance   = input.float(0.2, "Tolerancia (%)", minval=0.05, maxval=0.8, step=0.05, group="Doble T/S", tooltip="EUR: 0.2% — más estricto que XAU (0.4%) porque EUR se mueve menos en % por barra")
+dblMinDist     = input.int(6, "Distancia mínima entre picos (barras)", minval=4, maxval=20, group="Doble T/S", tooltip="Los dos picos/suelos deben estar separados al menos X barras")
+dblCooldown    = input.int(12, "Cooldown Doble T/S (barras)", minval=8, maxval=40, group="Doble T/S")
+
+showFlag       = input.bool(true, "Mostrar Flags", group="Flags")
+flagImpLen     = input.int(3, "Velas impulso mínimo", minval=2, maxval=8, group="Flags", tooltip="EUR: 3 velas — movimientos más cortos que XAU")
+flagConsolLen  = input.int(5, "Velas consolidación máximo", minval=3, maxval=12, group="Flags")
+flagMaxRetrace = input.float(45.0, "Retroceso máximo (%)", minval=20.0, maxval=70.0, group="Flags", tooltip="EUR: 45% — ligeramente más estricto que XAU (50%)")
+flagCooldown   = input.int(10, "Cooldown Flag (barras)", minval=6, maxval=30, group="Flags")
+
+showPivots     = input.bool(false, "Mostrar Pivots H/L", group="Visual", tooltip="Activar solo para análisis manual — puede generar ruido")
+swingLen       = input.int(4, "Swing Lookback", minval=3, maxval=10, group="Visual", tooltip="EUR: 4 barras — pivots más frecuentes que en XAU")
+showBiasPanel  = input.bool(true, "Mostrar Panel de Sesgo", group="Visual")
+labelOffset    = input.float(1.0, "Offset etiquetas (x ATR)", minval=0.5, maxval=3.0, group="Visual", tooltip="EUR: 1.0 — ATR más pequeño, offset reducido")
+
+// ============================================================================
+// COLORES
+// ============================================================================
+
+bullColor  = color.rgb(0, 230, 118)
+bearColor  = color.rgb(255, 82, 82)
+neutColor  = color.rgb(255, 235, 59)
+flagBullBg = color.new(color.rgb(0, 150, 255), 88)
+flagBearBg = color.new(color.rgb(255, 150, 0), 88)
+
+// ============================================================================
+// BASE
+// ============================================================================
+
+atrValue = ta.atr(14)
+offset   = atrValue * labelOffset
+
+// EMAs para filtro de tendencia (v1.2)
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+trendIsUp   = emaFast > emaSlow   // EMA9 > EMA21 = tendencia alcista
+trendIsDown = emaFast < emaSlow   // EMA9 < EMA21 = tendencia bajista
+
+// Swing pivots
+swingHigh = ta.pivothigh(high, swingLen, swingLen)
+swingLow  = ta.pivotlow(low,  swingLen, swingLen)
+
+if showPivots and not na(swingHigh)
+    label.new(bar_index[swingLen], swingHigh, "H",
+     style=label.style_label_down, color=color.new(bearColor, 50),
+     textcolor=color.white, size=size.tiny)
+
+if showPivots and not na(swingLow)
+    label.new(bar_index[swingLen], swingLow, "L",
+     style=label.style_label_up, color=color.new(bullColor, 50),
+     textcolor=color.white, size=size.tiny)
+
+// ============================================================================
+// COOLDOWN TRACKERS — evitan repetición en barras consecutivas
+// ============================================================================
+
+var int lastFallingWedgeBar = -999
+var int lastRisingWedgeBar  = -999
+var int lastDblTopBar       = -999
+var int lastDblBotBar       = -999
+var int lastBullFlagBar     = -999
+var int lastBearFlagBar     = -999
+
+// ============================================================================
+// PATRÓN 1: CUÑA DESCENDENTE / ASCENDENTE
+// ============================================================================
+// Lógica: calcular pendientes de highs y lows sobre el lookback.
+// Falling Wedge → ambas pendientes negativas + lows caen menos que highs
+// Rising Wedge  → ambas pendientes positivas + highs suben menos que lows
+// Trigger: solo cuando cambia de no-detectado a detectado (flanco)
+// ============================================================================
+
+// Pendientes normalizadas por ATR
+// EUR: umbrales más pequeños porque el ATR en EUR es ~0.0008 vs ~$15 en XAU
+highSlope = (high - high[wedgeLookback]) / wedgeLookback
+lowSlope  = (low  - low[wedgeLookback])  / wedgeLookback
+
+// Falling Wedge raw condition — EMA filter: requiere tendencia bajista previa
+fwRaw = highSlope < -atrValue * 0.02 and
+     lowSlope < 0 and
+     lowSlope > highSlope and
+     (highSlope - lowSlope) > atrValue * 0.01 and
+     trendIsDown
+
+// Rising Wedge raw condition — EMA filter: requiere tendencia alcista previa
+rwRaw = lowSlope > atrValue * 0.02 and
+     highSlope > 0 and
+     highSlope < lowSlope and
+     (lowSlope - highSlope) > atrValue * 0.01 and
+     trendIsUp
+
+// Trigger solo en el primer bar donde aparece (flanco ascendente)
+fwTrigger = fwRaw and not fwRaw[1] and barstate.isconfirmed
+rwTrigger = rwRaw and not rwRaw[1] and barstate.isconfirmed
+
+// Aplicar cooldown
+fallingWedge = showWedge and fwTrigger and (bar_index - lastFallingWedgeBar) >= wedgeCooldown
+risingWedge  = showWedge and rwTrigger and (bar_index - lastRisingWedgeBar)  >= wedgeCooldown
+
+if fallingWedge
+    lastFallingWedgeBar := bar_index
+    // Líneas de la cuña
+    line.new(bar_index - wedgeLookback, high[wedgeLookback], bar_index, high,
+         color=color.new(bullColor, 40), style=line.style_dotted, width=2)
+    line.new(bar_index - wedgeLookback, low[wedgeLookback], bar_index, low,
+         color=color.new(bullColor, 40), style=line.style_dotted, width=2)
+    label.new(bar_index, low - offset,
+         "FW+  BULL", style=label.style_label_up,
+         color=color.new(bullColor, 15), textcolor=color.white, size=size.small,
+         tooltip="Falling Wedge: highs y lows convergentes a la baja.\nAgotamiento bajista — sesgo ALCISTA para el trade.")
+
+if risingWedge
+    lastRisingWedgeBar := bar_index
+    line.new(bar_index - wedgeLookback, high[wedgeLookback], bar_index, high,
+         color=color.new(bearColor, 40), style=line.style_dotted, width=2)
+    line.new(bar_index - wedgeLookback, low[wedgeLookback], bar_index, low,
+         color=color.new(bearColor, 40), style=line.style_dotted, width=2)
+    label.new(bar_index, high + offset,
+         "RW-  BEAR", style=label.style_label_down,
+         color=color.new(bearColor, 15), textcolor=color.white, size=size.small,
+         tooltip="Rising Wedge: highs y lows convergentes al alza.\nAgotamiento alcista — sesgo BAJISTA para el trade.")
+
+// ============================================================================
+// PATRÓN 2: DOBLE TECHO / DOBLE SUELO
+// ============================================================================
+// Lógica: almacenar los últimos 2 pivot highs y 2 pivot lows.
+// Comparar si están dentro de tolerancia % y separados por dblMinDist barras.
+// Confirmar que el precio actual es coherente (bajo el techo / sobre el suelo).
+// Trigger: solo cuando el segundo pivot es nuevo (flanco de swingHigh/swingLow)
+// ============================================================================
+
+var float ph1 = na
+var float ph2 = na
+var int   ph1b = 0
+var int   ph2b = 0
+var float pl1 = na
+var float pl2 = na
+var int   pl1b = 0
+var int   pl2b = 0
+
+// Actualizar pivots cuando aparecen (con offset de swingLen barras)
+if not na(swingHigh)
+    ph2  := ph1
+    ph2b := ph1b
+    ph1  := swingHigh
+    ph1b := bar_index[swingLen]
+
+if not na(swingLow)
+    pl2  := pl1
+    pl2b := pl1b
+    pl1  := swingLow
+    pl1b := bar_index[swingLen]
+
+// Doble Techo — condición estricta
+dblTopRaw = not na(ph1) and not na(ph2) and
+     (bar_index - ph2b) <= dblLookback and
+     (ph1b - ph2b) >= dblMinDist and
+     math.abs(ph1 - ph2) / math.max(ph1, ph2) * 100 <= dblTolerance and
+     close < math.min(ph1, ph2) * 0.999
+
+// Doble Suelo — condición estricta
+dblBotRaw = not na(pl1) and not na(pl2) and
+     (bar_index - pl2b) <= dblLookback and
+     (pl1b - pl2b) >= dblMinDist and
+     math.abs(pl1 - pl2) / math.min(pl1, pl2) * 100 <= dblTolerance and
+     close > math.max(pl1, pl2) * 1.001
+
+// Trigger en flanco — solo cuando el segundo pivot es recién confirmado
+dblTopTrigger = dblTopRaw and not na(swingHigh) and barstate.isconfirmed
+dblBotTrigger = dblBotRaw and not na(swingLow)  and barstate.isconfirmed
+
+dblTopCond = showDouble and dblTopTrigger and (bar_index - lastDblTopBar) >= dblCooldown
+dblBotCond = showDouble and dblBotTrigger and (bar_index - lastDblBotBar) >= dblCooldown
+
+if dblTopCond
+    lastDblTopBar := bar_index
+    // Línea horizontal en el nivel del doble techo
+    peakLevel = math.max(ph1, ph2)
+    line.new(ph2b, peakLevel, bar_index + 5, peakLevel,
+         color=color.new(bearColor, 40), style=line.style_dashed, width=1)
+    label.new(bar_index, high + offset,
+         "2TOP  BEAR", style=label.style_label_down,
+         color=color.new(bearColor, 15), textcolor=color.white, size=size.small,
+         tooltip="Doble Techo: resistencia doble en " + str.tostring(peakLevel, "#.#####") +
+         "\nDiferencia: " + str.tostring(math.abs(ph1 - ph2) / peakLevel * 100, "#.###") + "%" +
+         "\nSesgo BAJISTA.")
+
+if dblBotCond
+    lastDblBotBar := bar_index
+    floorLevel = math.min(pl1, pl2)
+    line.new(pl2b, floorLevel, bar_index + 5, floorLevel,
+         color=color.new(bullColor, 40), style=line.style_dashed, width=1)
+    label.new(bar_index, low - offset,
+         "2BOT  BULL", style=label.style_label_up,
+         color=color.new(bullColor, 15), textcolor=color.white, size=size.small,
+         tooltip="Doble Suelo: soporte doble en " + str.tostring(floorLevel, "#.#####") +
+         "\nDiferencia: " + str.tostring(math.abs(pl1 - pl2) / floorLevel * 100, "#.###") + "%" +
+         "\nSesgo ALCISTA.")
+
+// ============================================================================
+// PATRÓN 3: BULL FLAG / BEAR FLAG
+// ============================================================================
+// Lógica: detectar impulso (N velas del mismo color) + consolidación posterior
+// La consolidación debe ser estrecha vs el impulso y retracer < X%
+// Trigger: en la última barra de consolidación, no durante todo el proceso
+// ============================================================================
+
+// Impulso: N velas consecutivas del mismo color
+bullImp = true
+bearImp = true
+for i = 1 to flagImpLen
+    if i <= bar_index
+        if not (close[i] > open[i])
+            bullImp := false
+        if not (close[i] < open[i])
+            bearImp := false
+
+// Rango del impulso (barras previas a la consolidación)
+impHigh = ta.highest(high, flagImpLen + flagConsolLen)[flagConsolLen]
+impLow  = ta.lowest(low,   flagImpLen + flagConsolLen)[flagConsolLen]
+impSize = impHigh - impLow
+
+// Consolidación actual
+cHigh = ta.highest(high, flagConsolLen)
+cLow  = ta.lowest(low,   flagConsolLen)
+cRange = cHigh - cLow
+
+// Canal estrecho: rango de consolidación < 60% del ATR promedio * barras
+avgATR = ta.sma(atrValue, 10)
+tightConsol = cRange < avgATR * flagConsolLen * 0.55
+
+// Retroceso de la consolidación
+bullRetrace = impSize > 0 ? (impHigh - cLow)  / impSize * 100 : 100
+bearRetrace = impSize > 0 ? (cHigh  - impLow) / impSize * 100 : 100
+
+// Condiciones raw — v1.2: FLAG+ solo en tendencia BULL, FLAG- solo en tendencia BEAR
+bullFlagRaw = bullImp and tightConsol and bullRetrace <= flagMaxRetrace and close > impLow and trendIsUp
+bearFlagRaw = bearImp and tightConsol and bearRetrace <= flagMaxRetrace and close < impHigh and trendIsDown
+
+// Trigger en flanco
+bullFlagTrig = bullFlagRaw and not bullFlagRaw[1] and barstate.isconfirmed
+bearFlagTrig = bearFlagRaw and not bearFlagRaw[1] and barstate.isconfirmed
+
+bullFlagCond = showFlag and bullFlagTrig and (bar_index - lastBullFlagBar) >= flagCooldown
+bearFlagCond = showFlag and bearFlagTrig and (bar_index - lastBearFlagBar) >= flagCooldown
+
+if bullFlagCond
+    lastBullFlagBar := bar_index
+    box.new(bar_index - flagConsolLen, cHigh, bar_index, cLow,
+         bgcolor=flagBullBg,
+         border_color=color.new(color.rgb(0, 150, 255), 40), border_width=1)
+    label.new(bar_index, low - offset * 1.4,
+         "FLAG+  BULL", style=label.style_label_up,
+         color=color.new(color.rgb(0, 150, 255), 15), textcolor=color.white, size=size.small,
+         tooltip="Bull Flag: impulso alcista + canal de consolidacion." +
+         "\nRetroceso: " + str.tostring(bullRetrace, "#.#") + "%" +
+         "\nContinuacion LONG esperada.")
+
+if bearFlagCond
+    lastBearFlagBar := bar_index
+    box.new(bar_index - flagConsolLen, cHigh, bar_index, cLow,
+         bgcolor=flagBearBg,
+         border_color=color.new(color.rgb(255, 150, 0), 40), border_width=1)
+    label.new(bar_index, high + offset * 1.4,
+         "FLAG-  BEAR", style=label.style_label_down,
+         color=color.new(color.rgb(255, 150, 0), 15), textcolor=color.white, size=size.small,
+         tooltip="Bear Flag: impulso bajista + canal de consolidacion." +
+         "\nRetroceso: " + str.tostring(bearRetrace, "#.#") + "%" +
+         "\nContinuacion SHORT esperada.")
+
+// ============================================================================
+// SESGO COMPUESTO
+// ============================================================================
+
+bullSignals = (fallingWedge ? 1 : 0) + (dblBotCond ? 1 : 0) + (bullFlagCond ? 1 : 0)
+bearSignals = (risingWedge  ? 1 : 0) + (dblTopCond ? 1 : 0) + (bearFlagCond ? 1 : 0)
+
+// Para el panel usar estado persistente — último sesgo conocido
+var int   lastBullBar   = 0
+var int   lastBearBar   = 0
+var string lastBullPats = "---"
+var string lastBearPats = "---"
+
+if bullSignals > 0
+    lastBullBar   := bar_index
+    lastBullPats  := (fallingWedge ? "FW+ " : "") + (dblBotCond ? "2BOT " : "") + (bullFlagCond ? "FLAG+ " : "")
+
+if bearSignals > 0
+    lastBearBar   := bar_index
+    lastBearPats  := (risingWedge ? "RW- " : "") + (dblTopCond ? "2TOP " : "") + (bearFlagCond ? "FLAG- " : "")
+
+// Sesgo basado en el patrón más reciente
+recentBull = bar_index - lastBullBar
+recentBear = bar_index - lastBearBar
+
+biasIsBull  = lastBullBar > 0 and (lastBearBar == 0 or recentBull <= recentBear) and recentBull <= 40
+biasIsBear  = lastBearBar > 0 and (lastBullBar == 0 or recentBear < recentBull)  and recentBear <= 40
+biasIsMixed = lastBullBar > 0 and lastBearBar > 0 and math.abs(recentBull - recentBear) <= 5 and recentBull <= 40 and recentBear <= 40
+
+biasDirection = biasIsMixed ? "MIXTO" : biasIsBull ? "ALCISTA" : biasIsBear ? "BAJISTA" : "SIN PATRON"
+biasAge       = biasIsBull ? recentBull : biasIsBear ? recentBear : 0
+biasAgeTxt    = biasAge <= 5 ? "RECIENTE" : biasAge <= 15 ? "VALIDO" : biasAge <= 30 ? "ANTIGUO" : "MUY ANT."
+biasAgeCol    = biasAge <= 5 ? bullColor : biasAge <= 15 ? neutColor : biasAge <= 30 ? color.orange : color.gray
+
+// ============================================================================
+// PANEL DE SESGO
+// ============================================================================
+
+if showBiasPanel
+    p = table.new(position.top_left, 2, 8,
+         bgcolor=color.new(color.black, 55),
+         border_width=1,
+         border_color=color.new(color.white, 75),
+         frame_width=1,
+         frame_color=color.new(color.white, 60))
+
+    // Header
+    table.cell(p, 0, 0, "BIAS EUR M30 v1.2", text_color=color.white,  text_size=size.tiny, bgcolor=color.new(color.navy, 40))
+    table.cell(p, 1, 0, "14:45 CET",     text_color=color.yellow, text_size=size.tiny, bgcolor=color.new(color.navy, 40))
+
+    // EMA filter status — nuevo v1.2
+    emaStatusTxt = trendIsUp ? "BULL (9>21)" : trendIsDown ? "BEAR (9<21)" : "MIX"
+    emaStatusCol = trendIsUp ? bullColor : trendIsDown ? bearColor : neutColor
+    table.cell(p, 0, 1, "EMA M30", text_color=color.gray, text_size=size.tiny)
+    table.cell(p, 1, 1, emaStatusTxt, text_color=emaStatusCol, text_size=size.tiny)
+
+    // Sesgo principal — fila con fondo de color
+    biasCol = biasDirection == "ALCISTA" ? bullColor : biasDirection == "BAJISTA" ? bearColor : biasDirection == "MIXTO" ? neutColor : color.gray
+    biasBg  = biasDirection == "ALCISTA" ? color.new(color.green, 68) : biasDirection == "BAJISTA" ? color.new(color.red, 68) : color.new(color.orange, 78)
+    table.cell(p, 0, 2, "Sesgo",        text_color=color.white, text_size=size.small, bgcolor=biasBg)
+    table.cell(p, 1, 2, biasDirection,  text_color=biasCol,     text_size=size.small, bgcolor=biasBg)
+
+    // Antiguedad del sesgo
+    table.cell(p, 0, 3, "Estado",   text_color=color.gray, text_size=size.tiny)
+    table.cell(p, 1, 3, biasAge > 0 ? biasAgeTxt + " (" + str.tostring(biasAge) + "b)" : "---", text_color=biasAgeCol, text_size=size.tiny)
+
+    // Patrones BULL detectados
+    bullColDisp = lastBullBar > 0 and recentBull <= 40 ? bullColor : color.gray
+    table.cell(p, 0, 4, "BULL", text_color=color.gray, text_size=size.tiny)
+    table.cell(p, 1, 4, lastBullBar > 0 and recentBull <= 40 ? lastBullPats : "---", text_color=bullColDisp, text_size=size.tiny)
+
+    // Patrones BEAR detectados
+    bearColDisp = lastBearBar > 0 and recentBear <= 40 ? bearColor : color.gray
+    table.cell(p, 0, 5, "BEAR", text_color=color.gray, text_size=size.tiny)
+    table.cell(p, 1, 5, lastBearBar > 0 and recentBear <= 40 ? lastBearPats : "---", text_color=bearColDisp, text_size=size.tiny)
+
+    // Instrucción operativa
+    instrTxt = biasDirection == "ALCISTA" ? "Solo LONG en M5" : biasDirection == "BAJISTA" ? "Solo SHORT en M5" : biasDirection == "MIXTO" ? "NO OPERAR hoy" : "Esperar patron"
+    instrCol = biasDirection == "ALCISTA" ? bullColor : biasDirection == "BAJISTA" ? bearColor : biasDirection == "MIXTO" ? bearColor : color.gray
+    instrBg  = biasDirection == "MIXTO" ? color.new(color.red, 75) : color.new(color.black, 80)
+    table.cell(p, 0, 6, "Accion",   text_color=color.gray,  text_size=size.tiny, bgcolor=instrBg)
+    table.cell(p, 1, 6, instrTxt,   text_color=instrCol,    text_size=size.tiny, bgcolor=instrBg)
+
+    // Confirmación requerida
+    table.cell(p, 0, 7, "Confirmar",   text_color=color.gray,  text_size=size.tiny)
+    table.cell(p, 1, 7, "SMS v8.1 M5", text_color=neutColor,   text_size=size.tiny)

@@ -1,0 +1,1257 @@
+//@version=6
+indicator("SMS Pro EURUSD v7.2.1", shorttitle="SMS-EUR v7.2", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=200)
+
+// ============================================================================
+// SMS PRO EURUSD v7.2 - STRUCTURAL INTEGRITY UPGRADE
+// ============================================================================
+// CAMBIOS vs v7.1:
+// ✅ FIX 1: EMA Cross Filter — LONG requiere EMA9 > EMA21, SHORT requiere EMA9 < EMA21
+// ✅ FIX 2: Overhead Resistance Filter — no LONG debajo de Bear OB activos
+// ✅ FIX 3: Congestion Zone Filter — no señales cuando Bull y Bear OB coexisten cerca
+// ============================================================================
+// CAMBIOS vs v7:
+// ✅ Confluencias ponderadas: "hard" (OB/FVG/Sweep/Structure) valen 2x
+// ✅ Require min 1 hard confluence: no señales solo de contexto ambiental
+// ✅ VWAP estricto: requiere estar en banda extrema, no solo above/below
+// ✅ Premium/Discount estricto: requiere Deep zone para confluencia
+// ✅ MTF Lock mejorado: bloquea en MIX cuando local contradice MTF
+// ✅ bearContinuation/bullContinuation más estricto (requiere body > 0.3 ATR)
+// ✅ Panel muestra hard/soft confluence breakdown
+// ✅ Score ahora /19 ponderado (hard=2, soft=1) en vez de /13 crudo
+// ============================================================================
+// CAMBIOS vs v6:
+// ✅ RSI Confluencia CORREGIDA (ya no regala +1 siempre)
+// ✅ Cooldown inteligente: 20 barras + anti-flip
+// ✅ Volume Confirmation (e3v / Range Volume inspired)
+// ✅ SMC LuxAlgo: Premium/Discount dinámico, Inducement, Breaker Blocks
+// ✅ Session Volume Profile (VWAP + desviaciones)
+// ✅ Alertas mejoradas: solo señales de alta calidad
+// ✅ Filtro anti-ruido: No señales contra MTF dominante
+// ✅ Confluence rebalanceada con ponderación
+// ============================================================================
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+// --- EMAs ---
+emaFastLen     = input.int(9, "EMA Rapida", minval=1, group="EMAs")
+emaSlowLen     = input.int(21, "EMA Lenta", minval=1, group="EMAs")
+ema200Len      = input.int(200, "EMA 200", minval=50, group="EMAs")
+showEMA200     = input.bool(true, "Mostrar EMA 200", group="EMAs")
+
+// --- Market Structure ---
+swingLen       = input.int(5, "Swing Lookback", minval=2, maxval=20, group="Structure")
+showBOS        = input.bool(true, "Mostrar BOS", group="Structure")
+showCHOCH      = input.bool(true, "Mostrar CHoCH", group="Structure")
+
+// --- Order Blocks ---
+showOB         = input.bool(true, "Mostrar Order Blocks", group="Order Blocks")
+maxOB          = input.int(3, "Max OB visibles", minval=1, maxval=10, group="Order Blocks")
+obMinStrength  = input.float(0.3, "OB Fuerza minima (x ATR)", minval=0.2, maxval=1.5, step=0.1, group="Order Blocks", tooltip="Body de vela OB debe ser > X veces ATR")
+
+// --- Breaker Blocks (SMC LuxAlgo) ---
+showBreakerOB  = input.bool(true, "Mostrar Breaker Blocks", group="Breaker Blocks", tooltip="OB invalidado que se convierte en soporte/resistencia")
+maxBreaker     = input.int(2, "Max Breaker visibles", minval=1, maxval=5, group="Breaker Blocks")
+
+// --- FVG ---
+showFVG        = input.bool(true, "Mostrar FVG", group="FVG")
+fvgMinSize     = input.float(0.03, "Tamano minimo FVG %", minval=0.01, maxval=0.5, group="FVG")
+maxFVG         = input.int(3, "Max FVG visibles", minval=1, maxval=10, group="FVG")
+useFVGConf     = input.bool(true, "Usar FVG como Confluencia", group="FVG")
+
+// --- Liquidez ---
+showSweeps     = input.bool(true, "Mostrar Liquidity Sweeps", group="Liquidez")
+showEQHL       = input.bool(false, "Mostrar Equal H/L", group="Liquidez")
+eqhLookback    = input.int(15, "Lookback EQH/L", minval=5, maxval=50, group="Liquidez")
+filterSweeps   = input.bool(true, "Filtrar Sweeps (solo en KZ)", group="Liquidez")
+showInducement = input.bool(true, "Mostrar Inducement", group="Liquidez", tooltip="Detecta liquidez interna que instituciones buscan capturar antes de mover precio")
+
+// --- Kill Zones ---
+showKillZones  = input.bool(true, "Mostrar Kill Zones", group="Kill Zones")
+onlyTradeKZ    = input.bool(true, "Solo senales en Kill Zone", group="Kill Zones")
+showTokyoKZ    = input.bool(false, "Incluir Tokyo KZ (para JPY)", group="Kill Zones")
+
+// --- Fibonacci / Premium-Discount ---
+showFib        = input.bool(true, "Mostrar Fib 50%", group="Fibonacci")
+fibLookback    = input.int(30, "Lookback", minval=10, maxval=100, group="Fibonacci")
+showPDLevels   = input.bool(true, "Mostrar Premium/Discount Cuadrantes", group="Fibonacci", tooltip="Divide el rango en zonas: Deep Discount, Discount, Premium, Deep Premium")
+
+// --- Senales ---
+showSignals    = input.bool(true, "Mostrar Senales", group="Senales")
+minConfluence  = input.int(5, "Minimo Confluencias Ponderadas", minval=3, maxval=15, group="Senales", tooltip="v7.1: Hard conf (OB/FVG/Sweep/Structure/Breaker) = 2pts, Soft (EMA/Zone/RSI/VWAP) = 1pt. Min 5 recomendado")
+showLabels     = input.bool(true, "Mostrar Labels SL/TP", group="Senales")
+cooldownBars   = input.int(20, "Cooldown entre senales (barras)", minval=5, maxval=50, group="Senales", tooltip="v6 usaba 10 = muy poco. 20 barras = ~1.5h en M5")
+requireMTFalign = input.bool(true, "Bloquear senales contra MTF", group="Senales", tooltip="CRITICO: No genera LONG si MTF es BEAR y viceversa. v7.1: también bloquea en MIX si local contradice")
+minQualityScore = input.int(0, "Score minimo de calidad (0=off)", minval=0, maxval=3, group="Senales", tooltip="0=todas, 1=normal+, 2=strong+, 3=solo premium")
+requireHardConf = input.bool(true, "Requerir min 1 Hard Confluence", group="Senales", tooltip="Exige al menos 1 confluencia dura (OB, FVG, Sweep, Structure, Breaker, Volume)")
+minBodyATR     = input.float(0.3, "Body minimo vs ATR para continuacion", minval=0.1, maxval=1.0, step=0.1, group="Senales", tooltip="bearContinuation/bullContinuation requiere body > X * ATR")
+
+// --- v7.2: Filtros Estructurales NUEVOS ---
+requireEMACross = input.bool(true, "Requerir EMA9 en direccion", group="Senales", tooltip="v7.2: LONG solo si EMA9>EMA21. SHORT solo si EMA9<EMA21")
+blockOverhead   = input.bool(true, "Bloquear LONG debajo de Bear OB", group="Senales", tooltip="v7.2: No da LONG si hay resistencia institucional encima")
+blockCongestion = input.bool(true, "Bloquear senales en congestion", group="Senales", tooltip="v7.2: Bull OB + Bear OB cerca del precio = chop. No operar")
+
+// --- ATR & Risk ---
+atrLen         = input.int(14, "Periodo ATR", minval=5, maxval=50, group="ATR & Risk")
+atrMult        = input.float(1.2, "Multiplicador SL", minval=0.5, maxval=3.0, group="ATR & Risk")
+rrRatio        = input.float(2.0, "Ratio R:R", minval=1.0, maxval=5.0, group="ATR & Risk")
+useOBforSL     = input.bool(true, "Usar OB para SL", group="ATR & Risk")
+
+// --- RSI (Confluencia CORREGIDA) ---
+useRSIConf     = input.bool(true, "Usar RSI como Confluencia", group="RSI Filter")
+rsiLen         = input.int(14, "Periodo RSI", minval=5, maxval=21, group="RSI Filter")
+rsiOB          = input.int(70, "Sobrecompra", minval=60, maxval=85, group="RSI Filter")
+rsiOS          = input.int(30, "Sobreventa", minval=15, maxval=40, group="RSI Filter")
+
+// --- MTF ---
+useMTFConf     = input.bool(true, "Usar MTF como Confluencia", group="MTF")
+mtfTF          = input.timeframe("30", "Temporalidad Superior", group="MTF")
+mtfEmaFLen     = input.int(9, "EMA Rapida HTF", minval=1, group="MTF")
+mtfEmaSLen     = input.int(21, "EMA Lenta HTF", minval=1, group="MTF")
+showMTFEmas    = input.bool(false, "Mostrar EMAs HTF", group="MTF")
+
+// --- Volume Confirmation (NUEVO - inspirado e3v/Range Volume) ---
+useVolConf     = input.bool(true, "Usar Volumen como Confluencia", group="Volume")
+volLen         = input.int(20, "Periodo promedio volumen", minval=5, maxval=50, group="Volume")
+volMultiplier  = input.float(1.3, "Multiplicador vol. significativo", minval=1.0, maxval=3.0, step=0.1, group="Volume", tooltip="Volumen actual > X veces promedio = confirmacion")
+showVolProfile = input.bool(true, "Mostrar VWAP Session", group="Volume", tooltip="VWAP de sesion con bandas de desviacion")
+vwapDevMult    = input.float(1.0, "VWAP Desviacion", minval=0.5, maxval=3.0, step=0.25, group="Volume")
+useVWAPConf    = input.bool(true, "Usar VWAP como Confluencia", group="Volume", tooltip="Suma +1 si precio en lado correcto del VWAP para la dirección")
+
+// --- Momentum Quality ---
+useMomQuality  = input.bool(true, "Evaluar Momentum", group="Momentum")
+momRangeMult   = input.float(1.5, "Mult. Rango vs Promedio", minval=1.0, maxval=3.0, step=0.1, group="Momentum")
+momCloseRatio  = input.float(0.7, "Cierre cerca extremo", minval=0.5, maxval=0.95, step=0.05, group="Momentum")
+momAvgLen      = input.int(20, "Periodo promedio rango", minval=5, maxval=50, group="Momentum")
+
+// --- BE Levels ---
+showBELevels   = input.bool(true, "Mostrar BE 1:1", group="BE Levels")
+beLevelExtend  = input.int(20, "Barras extension", minval=5, maxval=50, group="BE Levels")
+showTP2Level   = input.bool(false, "Mostrar TP2 parcial", group="BE Levels")
+
+// --- Spread ---
+spreadPips     = input.float(0.8, "Spread (pips)", minval=0.1, maxval=3.0, group="Spread", tooltip="EUR/USD tipico: 0.5-1.5 pips")
+addSpreadToSL  = input.bool(true, "Agregar spread al SL", group="Spread")
+spreadBuffer   = input.float(0.3, "Buffer adicional (pips)", minval=0.0, maxval=2.0, group="Spread")
+
+// --- Alertas ---
+enableAlerts   = input.bool(true, "Habilitar Alertas", group="Alertas")
+alertOnSweeps  = input.bool(false, "Alertas Sweeps", group="Alertas")
+alertOnCHoCH   = input.bool(true, "Alertas CHoCH", group="Alertas")
+alertOnBOS     = input.bool(false, "Alertas BOS", group="Alertas")
+alertMinConf   = input.int(5, "Min. confluencias para alerta", minval=3, maxval=11, group="Alertas", tooltip="Solo alerta si la señal tiene >= X confluencias")
+alertOnlyKZ    = input.bool(true, "Solo alertar en Kill Zone", group="Alertas", tooltip="Reduce ruido: solo alerta cuando estás en sesión activa")
+alertOnlyStrong = input.bool(false, "Solo alertar STRONG+", group="Alertas", tooltip="Solo manda alerta si momentum es STRONG o PREMIUM")
+
+// --- Panel ---
+showPanel      = input.bool(true, "Mostrar Panel Info", group="Visual")
+
+// ============================================================================
+// COLORES
+// ============================================================================
+
+bullColor      = color.rgb(0, 230, 118)
+bearColor      = color.rgb(255, 82, 82)
+bosColor       = color.rgb(0, 188, 212)
+chochColor     = color.rgb(255, 152, 0)
+obBullColor    = color.new(color.rgb(38, 166, 154), 80)
+obBearColor    = color.new(color.rgb(239, 83, 80), 80)
+fvgBullColor   = color.new(color.rgb(0, 150, 255), 80)
+fvgBearColor   = color.new(color.rgb(255, 150, 0), 80)
+breakerBullCol = color.new(color.rgb(0, 200, 255), 75)
+breakerBearCol = color.new(color.rgb(255, 100, 200), 75)
+vwapColor      = color.rgb(255, 235, 59)
+// Premium/Discount ahora via Fib lines, no bgcolor solido
+
+// ============================================================================
+// CALCULOS BASE
+// ============================================================================
+
+emaFast  = ta.ema(close, emaFastLen)
+emaSlow  = ta.ema(close, emaSlowLen)
+ema200   = ta.ema(close, ema200Len)
+atrValue = ta.atr(atrLen)
+rsiValue = ta.rsi(close, rsiLen)
+
+// --- MTF ---
+mtfEmaFast  = request.security(syminfo.tickerid, mtfTF, ta.ema(close, mtfEmaFLen), lookahead=barmerge.lookahead_off)
+mtfEmaSlow  = request.security(syminfo.tickerid, mtfTF, ta.ema(close, mtfEmaSLen), lookahead=barmerge.lookahead_off)
+mtfClose    = request.security(syminfo.tickerid, mtfTF, close, lookahead=barmerge.lookahead_off)
+mtfHigh     = request.security(syminfo.tickerid, mtfTF, high, lookahead=barmerge.lookahead_off)
+mtfLow      = request.security(syminfo.tickerid, mtfTF, low, lookahead=barmerge.lookahead_off)
+mtfRSI      = request.security(syminfo.tickerid, mtfTF, ta.rsi(close, rsiLen), lookahead=barmerge.lookahead_off)
+mtfTrendUp  = mtfEmaFast > mtfEmaSlow and mtfClose > mtfEmaSlow
+mtfTrendDn  = mtfEmaFast < mtfEmaSlow and mtfClose < mtfEmaSlow
+mtfTrendName = mtfTrendUp ? "BULL" : mtfTrendDn ? "BEAR" : "MIX"
+
+// Spread en precio (EUR/USD: pips * pipValue)
+pipValue = syminfo.mintick * 10  // 0.0001 para EUR/USD
+totalSpreadBuf = addSpreadToSL ? (spreadPips + spreadBuffer) * pipValue : 0
+
+trendUp    = emaFast > emaSlow
+trendDown  = emaFast < emaSlow
+htfTrendUp = close > ema200
+htfTrendDn = close < ema200
+
+bodySize   = math.abs(close - open)
+candleRange = high - low
+upperWick  = high - math.max(close, open)
+lowerWick  = math.min(close, open) - low
+isBullCandle = close > open
+isBearCandle = close < open
+
+// --- Momentum Quality ---
+avgRange = ta.sma(high - low, momAvgLen)
+isMomCandle = candleRange > avgRange * momRangeMult
+bullCloseStr = candleRange > 0 ? (close - low) / candleRange : 0
+bearCloseStr = candleRange > 0 ? (high - close) / candleRange : 0
+isStrongBullClose = bullCloseStr >= momCloseRatio and isBullCandle
+isStrongBearClose = bearCloseStr >= momCloseRatio and isBearCandle
+isStrongBull = isMomCandle and isStrongBullClose
+isStrongBear = isMomCandle and isStrongBearClose
+
+// --- Volume Analysis (NUEVO - e3v / Range Volume inspired) ---
+vol = volume
+avgVol = ta.sma(vol, volLen)
+isHighVol = vol > avgVol * volMultiplier
+isLowVol = vol < avgVol * 0.5
+// Volumen relativo (para scoring)
+volRatio = avgVol > 0 ? vol / avgVol : 1.0
+// Volume delta aproximado (close vs range)
+vDelta = candleRange > 0 ? (close - low) / candleRange * 2 - 1 : 0  // -1 a +1
+bullVolConf = isHighVol and vDelta > 0.3 and isBullCandle  // Alto volumen + delta positivo + vela alcista
+bearVolConf = isHighVol and vDelta < -0.3 and isBearCandle // Alto volumen + delta negativo + vela bajista
+
+// --- VWAP Session (Range Volume Profile simplificado) ---
+var float vwapSum = 0.0
+var float vwapVolSum = 0.0
+var float vwapSqSum = 0.0
+var bool newSession = false
+
+// Detectar nueva sesion (reset a las 17:00 EST = 22:00 UTC para forex)
+utcHourVwap = hour(time, "UTC")
+newSession := (utcHourVwap == 22 and utcHourVwap[1] != 22) or (na(vwapSum))
+
+if newSession
+    vwapSum := 0.0
+    vwapVolSum := 0.0
+    vwapSqSum := 0.0
+
+typicalPrice = (high + low + close) / 3
+vwapSum := vwapSum + typicalPrice * vol
+vwapVolSum := vwapVolSum + vol
+vwapSqSum := vwapSqSum + typicalPrice * typicalPrice * vol
+
+sessionVwap = vwapVolSum > 0 ? vwapSum / vwapVolSum : close
+vwapVariance = vwapVolSum > 0 ? (vwapSqSum / vwapVolSum) - (sessionVwap * sessionVwap) : 0
+vwapStdDev = math.sqrt(math.max(vwapVariance, 0))
+vwapUpper = sessionVwap + vwapStdDev * vwapDevMult
+vwapLower = sessionVwap - vwapStdDev * vwapDevMult
+
+priceAboveVwap = close > sessionVwap
+priceBelowVwap = close < sessionVwap
+priceNearVwap = math.abs(close - sessionVwap) < atrValue * 0.3  // Cerca del VWAP = zona de valor
+
+// ============================================================================
+// KILL ZONES
+// ============================================================================
+
+utcHour = hour(time, "UTC")
+estHour = (utcHour - 5 + 24) % 24
+
+inTokyoKZ   = showTokyoKZ and (estHour >= 19 or estHour < 1)
+inLondonKZ  = estHour >= 2 and estHour < 5
+inNYKZ      = estHour >= 7 and estHour < 10
+inNYOverlap = estHour >= 8 and estHour < 11
+inAnyKZ     = inLondonKZ or inNYKZ or inNYOverlap or inTokyoKZ
+
+// v7.1 FIX: Solo franja sutil en top/bottom del chart - transparencia 97
+kzBgColor = showKillZones ? (inLondonKZ ? color.new(color.blue, 97) : inNYKZ or inNYOverlap ? color.new(color.green, 97) : inTokyoKZ ? color.new(color.purple, 97) : na) : na
+bgcolor(kzBgColor)
+
+kzName = inLondonKZ ? "LONDON" : inNYOverlap ? "NY-OVERLAP" : inNYKZ ? "NEW YORK" : inTokyoKZ ? "TOKYO" : "FUERA KZ"
+
+// ============================================================================
+// MARKET STRUCTURE
+// ============================================================================
+
+swingHigh = ta.pivothigh(high, swingLen, swingLen)
+swingLow  = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSH = na
+var float lastSL = na
+var float prevSH = na
+var float prevSL = na
+var int trendDir = 0
+
+if not na(swingHigh)
+    prevSH := lastSH
+    lastSH := swingHigh
+if not na(swingLow)
+    prevSL := lastSL
+    lastSL := swingLow
+
+crossOverHigh  = ta.crossover(close, nz(lastSH, high))
+crossUnderLow  = ta.crossunder(close, nz(lastSL, low))
+
+bos_bull  = not na(lastSH) and crossOverHigh and trendDir == 1
+bos_bear  = not na(lastSL) and crossUnderLow and trendDir == -1
+choch_bull = not na(lastSH) and crossOverHigh and trendDir == -1
+choch_bear = not na(lastSL) and crossUnderLow and trendDir == 1
+
+if choch_bull or bos_bull
+    trendDir := 1
+if choch_bear or bos_bear
+    trendDir := -1
+
+bos_bull_c  = showBOS and bos_bull and barstate.isconfirmed
+bos_bear_c  = showBOS and bos_bear and barstate.isconfirmed
+choch_bull_c = showCHOCH and choch_bull and barstate.isconfirmed
+choch_bear_c = showCHOCH and choch_bear and barstate.isconfirmed
+
+// FIX: Variables confirmadas para confluencia (NO dependen de toggles de display)
+bos_bull_conf  = bos_bull and barstate.isconfirmed
+bos_bear_conf  = bos_bear and barstate.isconfirmed
+choch_bull_conf = choch_bull and barstate.isconfirmed
+choch_bear_conf = choch_bear and barstate.isconfirmed
+
+if bos_bull_c
+    label.new(bar_index, low, "BOS", style=label.style_label_up, color=bosColor, textcolor=color.white, size=size.tiny)
+if bos_bear_c
+    label.new(bar_index, high, "BOS", style=label.style_label_down, color=bosColor, textcolor=color.white, size=size.tiny)
+if choch_bull_c
+    label.new(bar_index, low, "CHoCH", style=label.style_label_up, color=chochColor, textcolor=color.white, size=size.small)
+if choch_bear_c
+    label.new(bar_index, high, "CHoCH", style=label.style_label_down, color=chochColor, textcolor=color.white, size=size.small)
+
+// ============================================================================
+// ORDER BLOCKS - CON ALMACENAMIENTO PARA SL
+// ============================================================================
+
+var array<box> bullOBBoxes    = array.new<box>()
+var array<box> bearOBBoxes    = array.new<box>()
+var array<float> bullOBTops   = array.new<float>()
+var array<float> bullOBBottoms = array.new<float>()
+var array<float> bearOBTops   = array.new<float>()
+var array<float> bearOBBottoms = array.new<float>()
+
+bullOB = isBearCandle[1] and isBullCandle and close > high[1] and (close - open) > atrValue * obMinStrength
+bearOB = isBullCandle[1] and isBearCandle and close < low[1] and (open - close) > atrValue * obMinStrength
+
+if showOB and bullOB and barstate.isconfirmed
+    if array.size(bullOBBoxes) >= maxOB
+        oldBox = array.shift(bullOBBoxes)
+        box.delete(oldBox)
+        array.shift(bullOBTops)
+        array.shift(bullOBBottoms)
+    newBox = box.new(bar_index - 1, high[1], bar_index + 30, low[1], bgcolor=obBullColor, border_color=bullColor, border_width=1)
+    array.push(bullOBBoxes, newBox)
+    array.push(bullOBTops, high[1])
+    array.push(bullOBBottoms, low[1])
+
+if showOB and bearOB and barstate.isconfirmed
+    if array.size(bearOBBoxes) >= maxOB
+        oldBox = array.shift(bearOBBoxes)
+        box.delete(oldBox)
+        array.shift(bearOBTops)
+        array.shift(bearOBBottoms)
+    newBox = box.new(bar_index - 1, high[1], bar_index + 30, low[1], bgcolor=obBearColor, border_color=bearColor, border_width=1)
+    array.push(bearOBBoxes, newBox)
+    array.push(bearOBTops, high[1])
+    array.push(bearOBBottoms, low[1])
+
+// ============================================================================
+// BREAKER BLOCKS (SMC LuxAlgo concept)
+// Un OB invalidado (mitigado) se convierte en Breaker Block
+// ============================================================================
+
+var array<box> bullBreakerBoxes = array.new<box>()
+var array<box> bearBreakerBoxes = array.new<box>()
+var array<float> bullBreakerTops = array.new<float>()
+var array<float> bullBreakerBots = array.new<float>()
+var array<float> bearBreakerTops = array.new<float>()
+var array<float> bearBreakerBots = array.new<float>()
+
+// Mitigar OB + crear Breaker
+if array.size(bullOBBoxes) > 0
+    for i = array.size(bullOBBoxes) - 1 to 0
+        if i < array.size(bullOBBottoms) and close < array.get(bullOBBottoms, i)
+            // Bull OB invalidado -> se convierte en Bearish Breaker (resistencia)
+            if showBreakerOB and array.size(bearBreakerBoxes) < maxBreaker
+                bTop = array.get(bullOBTops, i)
+                bBot = array.get(bullOBBottoms, i)
+                brkBox = box.new(bar_index, bTop, bar_index + 40, bBot, bgcolor=breakerBearCol, border_color=color.rgb(255, 100, 200), border_width=1, border_style=line.style_dashed)
+                array.push(bearBreakerBoxes, brkBox)
+                array.push(bearBreakerTops, bTop)
+                array.push(bearBreakerBots, bBot)
+            box.delete(array.get(bullOBBoxes, i))
+            array.remove(bullOBBoxes, i)
+            array.remove(bullOBTops, i)
+            array.remove(bullOBBottoms, i)
+
+if array.size(bearOBBoxes) > 0
+    for i = array.size(bearOBBoxes) - 1 to 0
+        if i < array.size(bearOBTops) and close > array.get(bearOBTops, i)
+            // Bear OB invalidado -> se convierte en Bullish Breaker (soporte)
+            if showBreakerOB and array.size(bullBreakerBoxes) < maxBreaker
+                bTop = array.get(bearOBTops, i)
+                bBot = array.get(bearOBBottoms, i)
+                brkBox = box.new(bar_index, bTop, bar_index + 40, bBot, bgcolor=breakerBullCol, border_color=color.rgb(0, 200, 255), border_width=1, border_style=line.style_dashed)
+                array.push(bullBreakerBoxes, brkBox)
+                array.push(bullBreakerTops, bTop)
+                array.push(bullBreakerBots, bBot)
+            box.delete(array.get(bearOBBoxes, i))
+            array.remove(bearOBBoxes, i)
+            array.remove(bearOBTops, i)
+            array.remove(bearOBBottoms, i)
+
+// Mitigar Breaker Blocks
+if array.size(bullBreakerBoxes) > 0
+    for i = array.size(bullBreakerBoxes) - 1 to 0
+        if i < array.size(bullBreakerBots) and close < array.get(bullBreakerBots, i)
+            box.delete(array.get(bullBreakerBoxes, i))
+            array.remove(bullBreakerBoxes, i)
+            array.remove(bullBreakerTops, i)
+            array.remove(bullBreakerBots, i)
+
+if array.size(bearBreakerBoxes) > 0
+    for i = array.size(bearBreakerBoxes) - 1 to 0
+        if i < array.size(bearBreakerTops) and close > array.get(bearBreakerTops, i)
+            box.delete(array.get(bearBreakerBoxes, i))
+            array.remove(bearBreakerBoxes, i)
+            array.remove(bearBreakerTops, i)
+            array.remove(bearBreakerBots, i)
+
+// --- OB Helper Functions ---
+getNearestBullOBBottom() =>
+    result = close - (atrValue * atrMult)
+    if array.size(bullOBBottoms) > 0
+        nearestDist = 999999.0
+        for i = 0 to array.size(bullOBBottoms) - 1
+            obBot = array.get(bullOBBottoms, i)
+            obTop = array.get(bullOBTops, i)
+            // FIX: Usar ATR para proximidad en vez de % fijo (gold se mueve mucho)
+            obProximity = atrValue * 0.5  // Dentro del OB o hasta 0.5 ATR por encima
+            if close >= obBot and close <= obTop + obProximity
+                dist = math.abs(close - obBot)
+                if dist < nearestDist
+                    nearestDist := dist
+                    result := obBot
+    result
+
+getNearestBearOBTop() =>
+    result = close + (atrValue * atrMult)
+    if array.size(bearOBTops) > 0
+        nearestDist = 999999.0
+        for i = 0 to array.size(bearOBTops) - 1
+            obTop = array.get(bearOBTops, i)
+            obBot = array.get(bearOBBottoms, i)
+            obProximity = atrValue * 0.5
+            if close <= obTop and close >= obBot - obProximity
+                dist = math.abs(obTop - close)
+                if dist < nearestDist
+                    nearestDist := dist
+                    result := obTop
+    result
+
+inBullOB() =>
+    result = false
+    if array.size(bullOBTops) > 0
+        for i = 0 to math.min(array.size(bullOBTops) - 1, maxOB - 1)
+            if low <= array.get(bullOBTops, i) and low >= array.get(bullOBBottoms, i)
+                result := true
+                break
+    result
+
+inBearOB() =>
+    result = false
+    if array.size(bearOBTops) > 0
+        for i = 0 to math.min(array.size(bearOBTops) - 1, maxOB - 1)
+            if high >= array.get(bearOBBottoms, i) and high <= array.get(bearOBTops, i)
+                result := true
+                break
+    result
+
+// Breaker Block detection
+inBullBreaker() =>
+    result = false
+    if array.size(bullBreakerTops) > 0
+        for i = 0 to math.min(array.size(bullBreakerTops) - 1, maxBreaker - 1)
+            if low <= array.get(bullBreakerTops, i) and low >= array.get(bullBreakerBots, i)
+                result := true
+                break
+    result
+
+inBearBreaker() =>
+    result = false
+    if array.size(bearBreakerTops) > 0
+        for i = 0 to math.min(array.size(bearBreakerTops) - 1, maxBreaker - 1)
+            if high >= array.get(bearBreakerBots, i) and high <= array.get(bearBreakerTops, i)
+                result := true
+                break
+    result
+
+// ============================================================================
+// v7.2: OVERHEAD RESISTANCE / UNDERLYING SUPPORT DETECTION
+// ============================================================================
+
+hasBearOBOverhead() =>
+    result = false
+    if array.size(bearOBBottoms) > 0
+        for i = 0 to math.min(array.size(bearOBBottoms) - 1, maxOB - 1)
+            obBot = array.get(bearOBBottoms, i)
+            if obBot > close and (obBot - close) < atrValue * 2.0
+                result := true
+                break
+    result
+
+hasBullOBUnderneath() =>
+    result = false
+    if array.size(bullOBTops) > 0
+        for i = 0 to math.min(array.size(bullOBTops) - 1, maxOB - 1)
+            obTop = array.get(bullOBTops, i)
+            if obTop < close and (close - obTop) < atrValue * 2.0
+                result := true
+                break
+    result
+
+// ============================================================================
+// v7.2: CONGESTION ZONE DETECTION
+// Bull OB + Bear OB ambos cerca = chop zone = NO OPERAR
+// ============================================================================
+
+isInCongestionZone() =>
+    hasBearNear = false
+    hasBullNear = false
+    if array.size(bearOBBottoms) > 0
+        for i = 0 to math.min(array.size(bearOBBottoms) - 1, maxOB - 1)
+            obBot = array.get(bearOBBottoms, i)
+            obTop = array.get(bearOBTops, i)
+            if math.abs(close - (obBot + obTop) / 2) < atrValue * 2.5
+                hasBearNear := true
+                break
+    if array.size(bullOBTops) > 0
+        for i = 0 to math.min(array.size(bullOBTops) - 1, maxOB - 1)
+            obBot = array.get(bullOBBottoms, i)
+            obTop = array.get(bullOBTops, i)
+            if math.abs(close - (obBot + obTop) / 2) < atrValue * 2.5
+                hasBullNear := true
+                break
+    hasBearNear and hasBullNear
+
+// ============================================================================
+// FVG
+// ============================================================================
+
+var array<box> bullFVGBoxes     = array.new<box>()
+var array<box> bearFVGBoxes     = array.new<box>()
+var array<float> bullFVGTops    = array.new<float>()
+var array<float> bullFVGBottoms = array.new<float>()
+var array<float> bearFVGTops    = array.new<float>()
+var array<float> bearFVGBottoms = array.new<float>()
+
+fvgMinPips = close * (fvgMinSize / 100)
+
+bullFVGCond = low > high[2] and (low - high[2]) > fvgMinPips and isBullCandle[1]
+bearFVGCond = high < low[2] and (low[2] - high) > fvgMinPips and isBearCandle[1]
+
+if showFVG and bullFVGCond and barstate.isconfirmed
+    if array.size(bullFVGBoxes) >= maxFVG
+        oldBox = array.shift(bullFVGBoxes)
+        box.delete(oldBox)
+        array.shift(bullFVGTops)
+        array.shift(bullFVGBottoms)
+    fvgBot = high[2]
+    fvgTop = low
+    newBox = box.new(bar_index - 2, fvgTop, bar_index + 30, fvgBot, bgcolor=fvgBullColor, border_color=color.new(color.blue, 50), border_width=1)
+    array.push(bullFVGBoxes, newBox)
+    array.push(bullFVGTops, fvgTop)
+    array.push(bullFVGBottoms, fvgBot)
+
+if showFVG and bearFVGCond and barstate.isconfirmed
+    if array.size(bearFVGBoxes) >= maxFVG
+        oldBox = array.shift(bearFVGBoxes)
+        box.delete(oldBox)
+        array.shift(bearFVGTops)
+        array.shift(bearFVGBottoms)
+    fvgBot = high
+    fvgTop = low[2]
+    newBox = box.new(bar_index - 2, fvgTop, bar_index + 30, fvgBot, bgcolor=fvgBearColor, border_color=color.new(color.orange, 50), border_width=1)
+    array.push(bearFVGBoxes, newBox)
+    array.push(bearFVGTops, fvgTop)
+    array.push(bearFVGBottoms, fvgBot)
+
+// Mitigar FVG
+if array.size(bullFVGBoxes) > 0
+    for i = array.size(bullFVGBoxes) - 1 to 0
+        if i < array.size(bullFVGBottoms) and low <= array.get(bullFVGBottoms, i)
+            box.delete(array.get(bullFVGBoxes, i))
+            array.remove(bullFVGBoxes, i)
+            array.remove(bullFVGTops, i)
+            array.remove(bullFVGBottoms, i)
+
+if array.size(bearFVGBoxes) > 0
+    for i = array.size(bearFVGBoxes) - 1 to 0
+        if i < array.size(bearFVGTops) and high >= array.get(bearFVGTops, i)
+            box.delete(array.get(bearFVGBoxes, i))
+            array.remove(bearFVGBoxes, i)
+            array.remove(bearFVGTops, i)
+            array.remove(bearFVGBottoms, i)
+
+inBullFVG() =>
+    result = false
+    if array.size(bullFVGTops) > 0
+        for i = 0 to math.min(array.size(bullFVGTops) - 1, maxFVG - 1)
+            if low <= array.get(bullFVGTops, i) and low >= array.get(bullFVGBottoms, i)
+                result := true
+                break
+    result
+
+inBearFVG() =>
+    result = false
+    if array.size(bearFVGTops) > 0
+        for i = 0 to math.min(array.size(bearFVGTops) - 1, maxFVG - 1)
+            if high >= array.get(bearFVGBottoms, i) and high <= array.get(bearFVGTops, i)
+                result := true
+                break
+    result
+
+// ============================================================================
+// INDUCEMENT (SMC LuxAlgo concept)
+// Liquidez interna: minor swing highs/lows que actúan como trampa
+// ============================================================================
+
+var float lastInducementHigh = na
+var float lastInducementLow = na
+
+minorSwingH = ta.pivothigh(high, 3, 3)
+minorSwingL = ta.pivotlow(low, 3, 3)
+
+if not na(minorSwingH) and not na(lastSH) and minorSwingH < lastSH
+    lastInducementHigh := minorSwingH
+
+if not na(minorSwingL) and not na(lastSL) and minorSwingL > lastSL
+    lastInducementLow := minorSwingL
+
+inducementSweptHigh = not na(lastInducementHigh) and high > lastInducementHigh and close < lastInducementHigh
+inducementSweptLow  = not na(lastInducementLow) and low < lastInducementLow and close > lastInducementLow
+
+if showInducement and inducementSweptHigh and barstate.isconfirmed
+    label.new(bar_index, high, "IDM", style=label.style_label_down, color=color.new(color.purple, 20), textcolor=color.white, size=size.tiny, tooltip="Inducement barrido - posible SHORT")
+    lastInducementHigh := na
+
+if showInducement and inducementSweptLow and barstate.isconfirmed
+    label.new(bar_index, low, "IDM", style=label.style_label_up, color=color.new(color.purple, 20), textcolor=color.white, size=size.tiny, tooltip="Inducement barrido - posible LONG")
+    lastInducementLow := na
+
+// ============================================================================
+// LIQUIDEZ
+// ============================================================================
+
+highestHigh = ta.highest(high[1], eqhLookback)
+lowestLow   = ta.lowest(low[1], eqhLookback)
+
+liqSweepHighRaw = high > highestHigh and close < open and upperWick > bodySize
+liqSweepLowRaw  = low < lowestLow and close > open and lowerWick > bodySize
+
+liqSweepHigh = filterSweeps ? (liqSweepHighRaw and inAnyKZ) : liqSweepHighRaw
+liqSweepLow  = filterSweeps ? (liqSweepLowRaw and inAnyKZ) : liqSweepLowRaw
+
+showSweepHLabel = showSweeps and liqSweepHigh and barstate.isconfirmed
+showSweepLLabel = showSweeps and liqSweepLow and barstate.isconfirmed
+
+if showSweepHLabel
+    label.new(bar_index, high, "SW", style=label.style_label_down, color=color.new(bearColor, 20), textcolor=color.white, size=size.tiny)
+
+if showSweepLLabel
+    label.new(bar_index, low, "SW", style=label.style_label_up, color=color.new(bullColor, 20), textcolor=color.white, size=size.tiny)
+
+// Equal H/L
+equalHighs() =>
+    threshold = close * 0.0002
+    count = 0
+    for i = 1 to eqhLookback
+        if math.abs(high - high[i]) < threshold
+            count += 1
+    count >= 3
+
+equalLows() =>
+    threshold = close * 0.0002
+    count = 0
+    for i = 1 to eqhLookback
+        if math.abs(low - low[i]) < threshold
+            count += 1
+    count >= 3
+
+hasEqHighs = equalHighs()
+hasEqLows  = equalLows()
+
+if showEQHL and hasEqHighs and barstate.isconfirmed
+    line.new(bar_index - eqhLookback, high, bar_index, high, color=color.new(color.purple, 50), style=line.style_dotted, width=1)
+if showEQHL and hasEqLows and barstate.isconfirmed
+    line.new(bar_index - eqhLookback, low, bar_index, low, color=color.new(color.purple, 50), style=line.style_dotted, width=1)
+
+// ============================================================================
+// FIBONACCI / PREMIUM-DISCOUNT ZONES (SMC LuxAlgo style)
+// ============================================================================
+
+fibHigh  = ta.highest(high, fibLookback)
+fibLow   = ta.lowest(low, fibLookback)
+fibRange = fibHigh - fibLow
+fib500   = fibHigh - fibRange * 0.500
+fib618   = fibHigh - fibRange * 0.618
+fib382   = fibHigh - fibRange * 0.382
+fib236   = fibHigh - fibRange * 0.236
+fib786   = fibHigh - fibRange * 0.786
+
+inDiscount     = close < fib500
+inPremium      = close > fib500
+inDeepDiscount = close < fib786   // Por debajo del 78.6% = deep discount
+inDeepPremium  = close > fib236   // Por encima del 23.6% = deep premium
+
+var line fib500Line = na
+var line fib618Line = na
+var line fib382Line = na
+var line fib786Line = na
+var line fib236Line = na
+if showFib and barstate.islast
+    line.delete(fib500Line)
+    line.delete(fib618Line)
+    line.delete(fib382Line)
+    line.delete(fib786Line)
+    line.delete(fib236Line)
+    fib500Line := line.new(bar_index - fibLookback, fib500, bar_index + 5, fib500, color=color.new(color.white, 40), style=line.style_dashed, width=1)
+    if showPDLevels
+        fib382Line := line.new(bar_index - fibLookback, fib382, bar_index + 5, fib382, color=color.new(color.red, 60), style=line.style_dotted, width=1)
+        fib618Line := line.new(bar_index - fibLookback, fib618, bar_index + 5, fib618, color=color.new(color.green, 60), style=line.style_dotted, width=1)
+        fib236Line := line.new(bar_index - fibLookback, fib236, bar_index + 5, fib236, color=color.new(color.red, 70), style=line.style_dotted, width=1)
+        fib786Line := line.new(bar_index - fibLookback, fib786, bar_index + 5, fib786, color=color.new(color.green, 70), style=line.style_dotted, width=1)
+
+// v7.1 FIX: Premium/Discount como lineas Fib, NO como bgcolor solido
+// El bgcolor con transparency 0 tapaba todo el chart
+// Ahora: solo tiny bar highlight en bottom, no full bgcolor
+// Deep zones: transparencia 96, normal zones: 98
+pdBgColor = showPDLevels ? (inDeepDiscount ? color.new(color.rgb(50, 255, 50), 96) : inDiscount ? color.new(color.rgb(50, 200, 50), 98) : inDeepPremium ? color.new(color.rgb(255, 50, 50), 96) : inPremium ? color.new(color.rgb(200, 50, 50), 98) : na) : na
+bgcolor(pdBgColor)
+
+zonaName = inDeepDiscount ? "DEEP DISC." : inDiscount ? "DISCOUNT" : inDeepPremium ? "DEEP PREM." : "PREMIUM"
+
+// ============================================================================
+// PATRONES DE VELA
+// ============================================================================
+
+bullRejection    = lowerWick > bodySize * 1.5 and lowerWick > upperWick * 2 and bodySize > 0
+bearRejection    = upperWick > bodySize * 1.5 and upperWick > lowerWick * 2 and bodySize > 0
+bullEngulfing    = isBullCandle and isBearCandle[1] and close > open[1] and open <= close[1]
+bearEngulfing    = isBearCandle and isBullCandle[1] and close < open[1] and open >= close[1]
+bullContinuation = (close > high[1] or bullEngulfing) and bodySize > atrValue * minBodyATR
+bearContinuation = (close < low[1] or bearEngulfing) and bodySize > atrValue * minBodyATR
+
+// ============================================================================
+// SISTEMA DE CONFLUENCIAS v7.1 - PONDERADO (HARD vs SOFT)
+// ============================================================================
+// 
+// v7 PROBLEMA: Todas las confluencias valían igual. Una señal 5/13 podía
+// tener 5 confluencias "ambientales" sin NINGUNA confirmación de precio real.
+//
+// v7.1 FIX: Sistema ponderado
+//   HARD confluences (acción de precio institucional) = 2 puntos cada una
+//   SOFT confluences (contexto ambiental) = 1 punto cada una
+//   + Requiere mínimo 1 hard confluence para generar señal
+//
+// HARD (2pts c/u): OB, FVG, Sweep, Structure (CHoCH/BOS), Volume, Breaker
+// SOFT (1pt c/u):  EMA trend, EMA200, Zone, Candle pattern, RSI, MTF, VWAP
+//
+// Max posible: 6 hard * 2 + 7 soft * 1 = 19 puntos
+// Minimo recomendado: 5 (requiere al menos 1 hard + contexto)
+// ============================================================================
+
+isInBullOB     = inBullOB()
+isInBearOB     = inBearOB()
+isInBullFVG    = inBullFVG()
+isInBearFVG    = inBearFVG()
+isInBullBrk    = inBullBreaker()
+isInBearBrk    = inBearBreaker()
+
+// --- RSI CORREGIDO (mismo que v7) ---
+rsiConfLong  = useRSIConf and (rsiValue < 40 or (rsiValue > rsiValue[1] and rsiValue[1] < 50))
+rsiConfShort = useRSIConf and (rsiValue > 60 or (rsiValue < rsiValue[1] and rsiValue[1] > 50))
+
+// --- VWAP v7.1: Más estricto - requiere estar en banda extrema ---
+vwapDistFromUpper = vwapUpper > 0 ? math.abs(close - vwapUpper) / atrValue : 999
+vwapDistFromLower = vwapLower > 0 ? math.abs(close - vwapLower) / atrValue : 999
+vwapConfLong  = useVWAPConf and (priceBelowVwap and vwapDistFromLower < 0.5)
+vwapConfShort = useVWAPConf and (priceAboveVwap and vwapDistFromUpper < 0.5)
+
+// --- Premium/Discount v7.1: Solo Deep zones cuentan ---
+zoneConfLong  = inDeepDiscount
+zoneConfShort = inDeepPremium
+
+// ============================================================================
+// HARD CONFLUENCES (2 puntos cada una) - Acción de precio institucional
+// ============================================================================
+
+hardOBLong      = isInBullOB ? 1 : 0
+hardFVGLong     = (useFVGConf and isInBullFVG) ? 1 : 0
+hardSweepLong   = (liqSweepLowRaw[1] or liqSweepLowRaw[2]) ? 1 : 0
+hardStructLong  = (choch_bull_conf[1] or choch_bull_conf[2] or bos_bull_conf[1]) ? 1 : 0
+hardVolLong     = (useVolConf and bullVolConf) ? 1 : 0
+hardBreakerLong = (showBreakerOB and isInBullBrk) ? 1 : 0
+
+hardCountLong = hardOBLong + hardFVGLong + hardSweepLong + hardStructLong + hardVolLong + hardBreakerLong
+hardScoreLong = hardCountLong * 2
+
+hardOBShort      = isInBearOB ? 1 : 0
+hardFVGShort     = (useFVGConf and isInBearFVG) ? 1 : 0
+hardSweepShort   = (liqSweepHighRaw[1] or liqSweepHighRaw[2]) ? 1 : 0
+hardStructShort  = (choch_bear_conf[1] or choch_bear_conf[2] or bos_bear_conf[1]) ? 1 : 0
+hardVolShort     = (useVolConf and bearVolConf) ? 1 : 0
+hardBreakerShort = (showBreakerOB and isInBearBrk) ? 1 : 0
+
+hardCountShort = hardOBShort + hardFVGShort + hardSweepShort + hardStructShort + hardVolShort + hardBreakerShort
+hardScoreShort = hardCountShort * 2
+
+// ============================================================================
+// SOFT CONFLUENCES (1 punto cada una) - Contexto ambiental
+// ============================================================================
+
+softEMALong     = trendUp ? 1 : 0
+softEMA200Long  = htfTrendUp ? 1 : 0
+softZoneLong    = zoneConfLong ? 1 : 0
+softCandleLong  = (bullRejection or bullEngulfing) ? 1 : 0
+softRSILong     = rsiConfLong ? 1 : 0
+softMTFLong     = (useMTFConf and mtfTrendUp) ? 1 : 0
+softVWAPLong    = vwapConfLong ? 1 : 0
+
+softScoreLong = softEMALong + softEMA200Long + softZoneLong + softCandleLong + softRSILong + softMTFLong + softVWAPLong
+
+softEMAShort     = trendDown ? 1 : 0
+softEMA200Short  = htfTrendDn ? 1 : 0
+softZoneShort    = zoneConfShort ? 1 : 0
+softCandleShort  = (bearRejection or bearEngulfing) ? 1 : 0
+softRSIShort     = rsiConfShort ? 1 : 0
+softMTFShort     = (useMTFConf and mtfTrendDn) ? 1 : 0
+softVWAPShort    = vwapConfShort ? 1 : 0
+
+softScoreShort = softEMAShort + softEMA200Short + softZoneShort + softCandleShort + softRSIShort + softMTFShort + softVWAPShort
+
+// ============================================================================
+// TOTAL SCORE PONDERADO
+// ============================================================================
+
+confLong  = hardScoreLong + softScoreLong
+confShort = hardScoreShort + softScoreShort
+
+hasHardConfLong  = requireHardConf ? (hardCountLong >= 1) : true
+hasHardConfShort = requireHardConf ? (hardCountShort >= 1) : true
+
+trendName = trendUp and htfTrendUp ? "BULL" : trendDown and htfTrendDn ? "BEAR" : "MIX"
+
+// ============================================================================
+// QUALITY SCORE (0-3)
+// 0 = Basic, 1 = Normal, 2 = Strong, 3 = Premium
+// ============================================================================
+
+qualityLong = 0
+qualityLong := qualityLong + (isStrongBull ? 1 : 0)
+qualityLong := qualityLong + (isHighVol ? 1 : 0)
+qualityLong := qualityLong + (inAnyKZ ? 1 : 0)
+
+qualityShort = 0
+qualityShort := qualityShort + (isStrongBear ? 1 : 0)
+qualityShort := qualityShort + (isHighVol ? 1 : 0)
+qualityShort := qualityShort + (inAnyKZ ? 1 : 0)
+
+qualityNameLong  = qualityLong >= 3 ? "⭐PREMIUM" : qualityLong >= 2 ? "⚡STRONG" : qualityLong >= 1 ? "✓NORMAL" : "○BASIC"
+qualityNameShort = qualityShort >= 3 ? "⭐PREMIUM" : qualityShort >= 2 ? "⚡STRONG" : qualityShort >= 1 ? "✓NORMAL" : "○BASIC"
+
+// ============================================================================
+// SENALES v7 - CON FILTROS MEJORADOS
+// ============================================================================
+
+kzFilter = onlyTradeKZ ? inAnyKZ : true
+
+// CRITICO v7.1: Bloquear señales contra MTF dominante (MEJORADO)
+// v7.1: También bloquea cuando MTF=MIX y trend local es opuesto
+mtfFilterLong  = requireMTFalign ? (mtfTrendUp or (not mtfTrendDn and trendUp)) : true
+mtfFilterShort = requireMTFalign ? (mtfTrendDn or (not mtfTrendUp and trendDown)) : true
+
+// Quality filter
+qualityFilterLong  = qualityLong >= minQualityScore
+qualityFilterShort = qualityShort >= minQualityScore
+
+// v7.2: EMA Cross Filter
+emaCrossFilterLong  = requireEMACross ? trendUp : true
+emaCrossFilterShort = requireEMACross ? trendDown : true
+
+// v7.2: Overhead Resistance / Underlying Support
+overheadResist   = hasBearOBOverhead()
+underlyingSupp   = hasBullOBUnderneath()
+overheadFilterLong  = blockOverhead ? (not overheadResist) : true
+overheadFilterShort = blockOverhead ? (not underlyingSupp) : true
+
+// v7.2: Congestion Zone
+congestionZone = isInCongestionZone()
+congestionFilter = blockCongestion ? (not congestionZone) : true
+
+longCondition  = confLong >= minConfluence and hasHardConfLong and bullContinuation and kzFilter and mtfFilterLong and qualityFilterLong and emaCrossFilterLong and overheadFilterLong and congestionFilter and barstate.isconfirmed
+shortCondition = confShort >= minConfluence and hasHardConfShort and bearContinuation and kzFilter and mtfFilterShort and qualityFilterShort and emaCrossFilterShort and overheadFilterShort and congestionFilter and barstate.isconfirmed
+
+var bool lastSignalLong  = false
+var bool lastSignalShort = false
+var int lastSignalBar    = 0
+
+// Reset flags on structure change
+if choch_bull or choch_bear
+    lastSignalLong := false
+    lastSignalShort := false
+
+// v7: Cooldown mejorado (20 barras por defecto vs 10 en v6)
+longSignal  = longCondition and not lastSignalLong and (bar_index - lastSignalBar > cooldownBars)
+shortSignal = shortCondition and not lastSignalShort and (bar_index - lastSignalBar > cooldownBars)
+
+if longSignal
+    lastSignalLong := true
+    lastSignalShort := false
+    lastSignalBar := bar_index
+
+if shortSignal
+    lastSignalShort := true
+    lastSignalLong := false
+    lastSignalBar := bar_index
+
+// ============================================================================
+// VISUALIZACION
+// ============================================================================
+
+plot(emaFast, "EMA 9", color=bullColor, linewidth=2)
+plot(emaSlow, "EMA 21", color=bearColor, linewidth=2)
+plot(showEMA200 ? ema200 : na, "EMA 200", color=color.new(color.white, 60), linewidth=1)
+plot(showMTFEmas ? mtfEmaFast : na, "MTF EMA Fast", color=color.new(color.yellow, 40), linewidth=1, style=plot.style_stepline)
+plot(showMTFEmas ? mtfEmaSlow : na, "MTF EMA Slow", color=color.new(color.orange, 40), linewidth=1, style=plot.style_stepline)
+
+// VWAP Session - v7.1: linea fina para no tapar velas
+plot(showVolProfile ? sessionVwap : na, "Session VWAP", color=color.new(vwapColor, 30), linewidth=1, style=plot.style_line)
+plot(showVolProfile ? vwapUpper : na, "VWAP Upper", color=color.new(vwapColor, 70), linewidth=1, style=plot.style_circles)
+plot(showVolProfile ? vwapLower : na, "VWAP Lower", color=color.new(vwapColor, 70), linewidth=1, style=plot.style_circles)
+
+// Senales con color por calidad
+longColor  = qualityLong >= 3 ? color.rgb(0, 255, 180) : qualityLong >= 2 ? color.rgb(0, 230, 118) : color.rgb(100, 200, 100)
+shortColor = qualityShort >= 3 ? color.rgb(255, 30, 30) : qualityShort >= 2 ? color.rgb(255, 82, 82) : color.rgb(200, 100, 100)
+
+plotshape(showSignals and longSignal, title="LONG", style=shape.triangleup, location=location.belowbar, color=longColor, size=size.normal)
+plotshape(showSignals and shortSignal, title="SHORT", style=shape.triangledown, location=location.abovebar, color=shortColor, size=size.normal)
+
+// --- Volume histogram en barras (inspirado Range Volume) ---
+barcolor(isHighVol and isBullCandle ? color.new(bullColor, 20) : isHighVol and isBearCandle ? color.new(bearColor, 20) : na)
+
+// Labels con SL/TP + Quality Score + Volume
+if showSignals and showLabels and longSignal
+    slBase = useOBforSL ? getNearestBullOBBottom() : close - (atrValue * atrMult)
+    slPrice = slBase - totalSpreadBuf
+    riskAmt = close - slPrice
+    tpPrice = close + (riskAmt * rrRatio)
+    slPips = riskAmt / pipValue
+    tpPips = (tpPrice - close) / pipValue
+    bePips = riskAmt / pipValue
+    slType = "ATR"
+    if useOBforSL
+        atrFallback = close - (atrValue * atrMult)
+        if math.abs(slBase - atrFallback) > pipValue
+            slType := "OB"
+    fvgTxt = isInBullFVG ? " +FVG" : ""
+    brkTxt = isInBullBrk ? " +BRK" : ""
+    volTxt = bullVolConf ? " +VOL" : ""
+    bePrice = close + riskAmt
+    
+    label.new(bar_index, low, 
+      "LONG " + str.tostring(confLong) + "/19 (" + str.tostring(hardCountLong) + "H) " + qualityNameLong + fvgTxt + brkTxt + volTxt + "\n" +
+      "SL[" + slType + "]: " + str.tostring(slPrice, "#.#####") + " (" + str.tostring(slPips, "#.#") + "p)\n" +
+      "BE: " + str.tostring(bePrice, "#.#####") + " (" + str.tostring(bePips, "#.#") + "p)\n" +
+      "TP: " + str.tostring(tpPrice, "#.#####") + " (" + str.tostring(tpPips, "#.#") + "p)", 
+      style=label.style_label_up, color=qualityLong >= 3 ? color.new(color.rgb(0, 255, 180), 0) : qualityLong >= 2 ? color.new(bullColor, 0) : color.new(bullColor, 30), textcolor=color.white, size=size.small)
+    
+    if showBELevels
+        line.new(bar_index, bePrice, bar_index + beLevelExtend, bePrice, color=color.new(color.yellow, 30), style=line.style_dashed, width=1)
+        label.new(bar_index + beLevelExtend, bePrice, "BE 1:1", color=color.new(color.yellow, 60), textcolor=color.white, size=size.tiny, style=label.style_label_left)
+        line.new(bar_index, slPrice, bar_index + beLevelExtend, slPrice, color=color.new(bearColor, 30), style=line.style_dashed, width=1)
+        line.new(bar_index, tpPrice, bar_index + beLevelExtend, tpPrice, color=color.new(bullColor, 30), style=line.style_dashed, width=1)
+    if showTP2Level
+        tp2Price = close + (riskAmt * 1.0)  // FIX: TP2 parcial al 1:1 (distinto de BE visual)
+        line.new(bar_index, tp2Price, bar_index + beLevelExtend, tp2Price, color=color.new(color.aqua, 40), style=line.style_dotted, width=1)
+        label.new(bar_index + beLevelExtend, tp2Price, "TP1 1:1", color=color.new(color.aqua, 60), textcolor=color.white, size=size.tiny, style=label.style_label_left)
+
+if showSignals and showLabels and shortSignal
+    slBase = useOBforSL ? getNearestBearOBTop() : close + (atrValue * atrMult)
+    slPrice = slBase + totalSpreadBuf
+    riskAmt = slPrice - close
+    tpPrice = close - (riskAmt * rrRatio)
+    slPips = riskAmt / pipValue
+    tpPips = (close - tpPrice) / pipValue
+    bePips = riskAmt / pipValue
+    slType = "ATR"
+    if useOBforSL
+        atrFallback = close + (atrValue * atrMult)
+        if math.abs(slBase - atrFallback) > pipValue
+            slType := "OB"
+    fvgTxt = isInBearFVG ? " +FVG" : ""
+    brkTxt = isInBearBrk ? " +BRK" : ""
+    volTxt = bearVolConf ? " +VOL" : ""
+    bePrice = close - riskAmt
+    
+    label.new(bar_index, high, 
+      "SHORT " + str.tostring(confShort) + "/19 (" + str.tostring(hardCountShort) + "H) " + qualityNameShort + fvgTxt + brkTxt + volTxt + "\n" +
+      "SL[" + slType + "]: " + str.tostring(slPrice, "#.#####") + " (" + str.tostring(slPips, "#.#") + "p)\n" +
+      "BE: " + str.tostring(bePrice, "#.#####") + " (" + str.tostring(bePips, "#.#") + "p)\n" +
+      "TP: " + str.tostring(tpPrice, "#.#####") + " (" + str.tostring(tpPips, "#.#") + "p)", 
+      style=label.style_label_down, color=qualityShort >= 3 ? color.new(color.rgb(255, 30, 30), 0) : qualityShort >= 2 ? color.new(bearColor, 0) : color.new(bearColor, 30), textcolor=color.white, size=size.small)
+    
+    if showBELevels
+        line.new(bar_index, bePrice, bar_index + beLevelExtend, bePrice, color=color.new(color.yellow, 30), style=line.style_dashed, width=1)
+        label.new(bar_index + beLevelExtend, bePrice, "BE 1:1", color=color.new(color.yellow, 60), textcolor=color.white, size=size.tiny, style=label.style_label_left)
+        line.new(bar_index, slPrice, bar_index + beLevelExtend, slPrice, color=color.new(bearColor, 30), style=line.style_dashed, width=1)
+        line.new(bar_index, tpPrice, bar_index + beLevelExtend, tpPrice, color=color.new(bullColor, 30), style=line.style_dashed, width=1)
+    if showTP2Level
+        tp2Price = close - (riskAmt * 1.0)  // FIX: TP2 parcial al 1:1
+        line.new(bar_index, tp2Price, bar_index + beLevelExtend, tp2Price, color=color.new(color.aqua, 40), style=line.style_dotted, width=1)
+        label.new(bar_index + beLevelExtend, tp2Price, "TP1 1:1", color=color.new(color.aqua, 60), textcolor=color.white, size=size.tiny, style=label.style_label_left)
+
+// ============================================================================
+// PANEL INFORMATIVO v7 - EXPANDIDO
+// ============================================================================
+
+var table panel = table.new(position.top_right, 2, 28, bgcolor=color.new(color.black, 85), border_width=1, border_color=color.gray)
+
+if showPanel and barstate.islast
+    trendTxt = trendUp and htfTrendUp ? "BULL" : trendDown and htfTrendDn ? "BEAR" : "MIX"
+    trendCol = trendUp and htfTrendUp ? bullColor : trendDown and htfTrendDn ? bearColor : color.yellow
+    kzTxt = inLondonKZ ? "LONDON" : inNYOverlap ? "NY-OVL" : inNYKZ ? "NY" : inTokyoKZ ? "TKY" : "-"
+    kzCol = inAnyKZ ? color.lime : color.gray
+    zonaTxt = zonaName
+    zonaCol = inDiscount ? bullColor : bearColor
+    fvgTxt = isInBullFVG ? "BULL" : isInBearFVG ? "BEAR" : "-"
+    fvgCol = isInBullFVG ? color.rgb(0, 150, 255) : isInBearFVG ? color.rgb(255, 150, 0) : color.gray
+    
+    table.cell(panel, 0, 0, "SMS-EUR v7.2", text_color=color.rgb(255, 215, 0), text_size=size.small)
+    table.cell(panel, 1, 0, "PRO", text_color=color.rgb(0, 150, 255), text_size=size.small)
+    
+    table.cell(panel, 0, 1, "Trend", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 1, trendTxt, text_color=trendCol, text_size=size.tiny)
+    
+    mtfCol = mtfTrendUp ? bullColor : mtfTrendDn ? bearColor : color.yellow
+    table.cell(panel, 0, 2, "MTF " + mtfTF, text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 2, mtfTrendName, text_color=mtfCol, text_size=size.tiny)
+    
+    table.cell(panel, 0, 3, "KZ", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 3, kzTxt, text_color=kzCol, text_size=size.tiny)
+    
+    table.cell(panel, 0, 4, "Zona", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 4, zonaTxt, text_color=zonaCol, text_size=size.tiny)
+    
+    table.cell(panel, 0, 5, "ATR", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 5, str.tostring(atrValue / pipValue, "#.#") + "p", text_color=color.orange, text_size=size.tiny)
+    
+    table.cell(panel, 0, 6, "OB", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 6, isInBullOB ? "BULL" : isInBearOB ? "BEAR" : "-", text_color=isInBullOB ? bullColor : isInBearOB ? bearColor : color.gray, text_size=size.tiny)
+    
+    table.cell(panel, 0, 7, "FVG", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 7, fvgTxt, text_color=fvgCol, text_size=size.tiny)
+    
+    // Breaker Block
+    brkTxt = isInBullBrk ? "BULL" : isInBearBrk ? "BEAR" : "-"
+    brkCol = isInBullBrk ? color.rgb(0, 200, 255) : isInBearBrk ? color.rgb(255, 100, 200) : color.gray
+    table.cell(panel, 0, 8, "Breaker", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 8, brkTxt, text_color=brkCol, text_size=size.tiny)
+    
+    rsiTxt = rsiValue < rsiOS ? "OVERSOLD" : rsiValue > rsiOB ? "OVERBOUGHT" : str.tostring(rsiValue, "#.0")
+    rsiCol = rsiValue < rsiOS ? bullColor : rsiValue > rsiOB ? bearColor : color.white
+    table.cell(panel, 0, 9, "RSI", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 9, rsiTxt, text_color=rsiCol, text_size=size.tiny)
+    
+    // Volume
+    volTxt = isHighVol ? "HIGH (" + str.tostring(volRatio, "#.#") + "x)" : isLowVol ? "LOW" : str.tostring(volRatio, "#.#") + "x"
+    volCol = isHighVol ? color.lime : isLowVol ? color.gray : color.white
+    table.cell(panel, 0, 10, "Volume", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 10, volTxt, text_color=volCol, text_size=size.tiny)
+    
+    // VWAP v7.1: mostrar si está en zona de confluencia estricta
+    vwapPosTxt = vwapConfShort ? "↑BAND" : vwapConfLong ? "↓BAND" : priceAboveVwap ? "ABOVE" : priceBelowVwap ? "BELOW" : "AT"
+    vwapPosCol = vwapConfShort ? bearColor : vwapConfLong ? bullColor : priceAboveVwap ? color.rgb(200, 100, 100) : priceBelowVwap ? color.rgb(100, 200, 100) : color.yellow
+    table.cell(panel, 0, 11, "VWAP", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 11, vwapPosTxt, text_color=vwapPosCol, text_size=size.tiny)
+    
+    table.cell(panel, 0, 12, "L-Conf", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 12, str.tostring(confLong) + "/19 (" + str.tostring(hardCountLong) + "H+" + str.tostring(softScoreLong) + "S)", text_color=confLong >= minConfluence and hasHardConfLong ? bullColor : confLong >= minConfluence ? color.yellow : color.gray, text_size=size.tiny)
+    
+    table.cell(panel, 0, 13, "S-Conf", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 13, str.tostring(confShort) + "/19 (" + str.tostring(hardCountShort) + "H+" + str.tostring(softScoreShort) + "S)", text_color=confShort >= minConfluence and hasHardConfShort ? bearColor : confShort >= minConfluence ? color.yellow : color.gray, text_size=size.tiny)
+    
+    table.cell(panel, 0, 14, "Spread", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 14, str.tostring(spreadPips, "#.#") + "p", text_color=color.orange, text_size=size.tiny)
+    
+    table.cell(panel, 0, 15, "SL Mode", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 15, useOBforSL ? "OB+Spread" : "ATR", text_color=color.aqua, text_size=size.tiny)
+    
+    table.cell(panel, 0, 16, "Alertas", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 16, enableAlerts ? "ON" : "OFF", text_color=enableAlerts ? color.lime : color.gray, text_size=size.tiny)
+    
+    table.cell(panel, 0, 17, "FVG Conf", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 17, useFVGConf ? "ON" : "OFF", text_color=useFVGConf ? color.lime : color.gray, text_size=size.tiny)
+    
+    table.cell(panel, 0, 18, "RSI Conf", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 18, useRSIConf ? "ON (FIX)" : "OFF", text_color=useRSIConf ? color.lime : color.gray, text_size=size.tiny)
+    
+    table.cell(panel, 0, 19, "MTF Conf", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 19, useMTFConf ? "ON (" + mtfTF + ")" : "OFF", text_color=useMTFConf ? color.lime : color.gray, text_size=size.tiny)
+    
+    table.cell(panel, 0, 20, "Vol Conf", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 20, useVolConf ? "ON" : "OFF", text_color=useVolConf ? color.lime : color.gray, text_size=size.tiny)
+    
+    // MTF Align lock
+    mtfLockTxt = requireMTFalign ? "LOCKED" : "FREE"
+    mtfLockCol = requireMTFalign ? color.rgb(255, 215, 0) : color.gray
+    table.cell(panel, 0, 21, "MTF Lock", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 21, mtfLockTxt, text_color=mtfLockCol, text_size=size.tiny)
+    
+    // Momentum & Quality
+    momTxt = isStrongBull ? "⚡BULL" : isStrongBear ? "⚡BEAR" : isMomCandle ? "ACTIVE" : "-"
+    momCol = isStrongBull ? bullColor : isStrongBear ? bearColor : isMomCandle ? color.yellow : color.gray
+    table.cell(panel, 0, 22, "Momentum", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 22, momTxt, text_color=momCol, text_size=size.tiny)
+    
+    table.cell(panel, 0, 23, "BE Level", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 23, showBELevels ? "ON" : "OFF", text_color=showBELevels ? color.lime : color.gray, text_size=size.tiny)
+    
+    // v7.2: Structural filters
+    table.cell(panel, 0, 24, "EMA Cross", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 24, trendUp ? "BULL" : trendDown ? "BEAR" : "FLAT", text_color=trendUp ? color.lime : trendDown ? color.rgb(255, 82, 82) : color.yellow, text_size=size.tiny)
+    
+    overheadTxt = overheadResist ? "BLOCKED" : "CLEAR"
+    overheadCol = overheadResist ? color.rgb(255, 82, 82) : color.lime
+    table.cell(panel, 0, 25, "Overhead", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 25, overheadTxt, text_color=overheadCol, text_size=size.tiny)
+    
+    congTxt = congestionZone ? "CHOP!" : "CLEAR"
+    congCol = congestionZone ? color.rgb(255, 82, 82) : color.lime
+    table.cell(panel, 0, 26, "Congestion", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 26, congTxt, text_color=congCol, text_size=size.tiny)
+
+    // STATUS — fila maestra derivada de todas las condiciones del sistema
+    bool statusLongReady  = confLong >= minConfluence and hasHardConfLong and mtfFilterLong and emaCrossFilterLong and overheadFilterLong and congestionFilter and kzFilter
+    bool statusShortReady = confShort >= minConfluence and hasHardConfShort and mtfFilterShort and emaCrossFilterShort and overheadFilterShort and congestionFilter and kzFilter
+    string statusTxt = statusLongReady ? "LONG OK" : statusShortReady ? "SHORT OK" : "WAIT"
+    color statusCol  = statusLongReady ? color.lime : statusShortReady ? color.rgb(255, 82, 82) : color.rgb(255, 200, 0)
+    color statusBg   = statusLongReady ? color.new(color.lime, 75) : statusShortReady ? color.new(color.red, 75) : color.new(color.yellow, 85)
+    table.cell(panel, 0, 27, "Status", text_color=color.white, text_size=size.tiny)
+    table.cell(panel, 1, 27, statusTxt, text_color=statusCol, bgcolor=statusBg, text_size=size.tiny)
+
+// ============================================================================
+// ALERTAS v7 - MEJORADAS: FILTROS DE CALIDAD
+// ============================================================================
+
+slLongCalc  = useOBforSL ? getNearestBullOBBottom() - totalSpreadBuf : close - (atrValue * atrMult) - totalSpreadBuf
+tpLongCalc  = close + ((close - slLongCalc) * rrRatio)
+slShortCalc = useOBforSL ? getNearestBearOBTop() + totalSpreadBuf : close + (atrValue * atrMult) + totalSpreadBuf
+tpShortCalc = close - ((slShortCalc - close) * rrRatio)
+
+slLongPips   = (close - slLongCalc) / pipValue
+tpLongPips   = (tpLongCalc - close) / pipValue
+slShortPips  = (slShortCalc - close) / pipValue
+tpShortPips  = (close - tpShortCalc) / pipValue
+
+beLongCalc  = close + (close - slLongCalc)
+beShortCalc = close - (slShortCalc - close)
+beLongPips  = (beLongCalc - close) / pipValue
+beShortPips = (close - beShortCalc) / pipValue
+
+fvgLongTxt  = isInBullFVG ? "✅" : "❌"
+fvgShortTxt = isInBearFVG ? "✅" : "❌"
+volLongTxt  = bullVolConf ? "✅HIGH" : "◯"
+volShortTxt = bearVolConf ? "✅HIGH" : "◯"
+
+longMessage = "🟢 LONG EURUSD v7.2\n" +
+     "━━━━━━━━━━━━━━━\n" +
+     "📍 Entrada: " + str.tostring(close, "#.#####") + "\n" +
+     "🛑 SL: " + str.tostring(slLongCalc, "#.#####") + " (" + str.tostring(slLongPips, "#.#") + "p)\n" +
+     "🔰 BE 1:1: " + str.tostring(beLongCalc, "#.#####") + " (" + str.tostring(beLongPips, "#.#") + "p)\n" +
+     "🎯 TP: " + str.tostring(tpLongCalc, "#.#####") + " (" + str.tostring(tpLongPips, "#.#") + "p)\n" +
+     "━━━━━━━━━━━━━━━\n" +
+     "📊 Confluencias: " + str.tostring(confLong) + "/19 (" + str.tostring(hardCountLong) + "H+" + str.tostring(softScoreLong) + "S)\n" +
+     "🏆 Calidad: " + qualityNameLong + "\n" +
+     "📦 FVG: " + fvgLongTxt + "\n" +
+     "📊 Volumen: " + volLongTxt + " (" + str.tostring(volRatio, "#.#") + "x)\n" +
+     "📉 RSI: " + str.tostring(rsiValue, "#.0") + "\n" +
+     "⏰ Kill Zone: " + kzName + "\n" +
+     "📈 Tendencia: " + trendName + "\n" +
+     "🔄 MTF " + mtfTF + ": " + mtfTrendName + "\n" +
+     "🎚️ Zona: " + zonaName + "\n" +
+     "📐 ATR: " + str.tostring(atrValue / pipValue, "#.#") + "p\n" +
+     "📏 VWAP: " + str.tostring(sessionVwap, "#.#####")
+
+shortMessage = "🔴 SHORT EURUSD v7.2\n" +
+     "━━━━━━━━━━━━━━━\n" +
+     "📍 Entrada: " + str.tostring(close, "#.#####") + "\n" +
+     "🛑 SL: " + str.tostring(slShortCalc, "#.#####") + " (" + str.tostring(slShortPips, "#.#") + "p)\n" +
+     "🔰 BE 1:1: " + str.tostring(beShortCalc, "#.#####") + " (" + str.tostring(beShortPips, "#.#") + "p)\n" +
+     "🎯 TP: " + str.tostring(tpShortCalc, "#.#####") + " (" + str.tostring(tpShortPips, "#.#") + "p)\n" +
+     "━━━━━━━━━━━━━━━\n" +
+     "📊 Confluencias: " + str.tostring(confShort) + "/19 (" + str.tostring(hardCountShort) + "H+" + str.tostring(softScoreShort) + "S)\n" +
+     "🏆 Calidad: " + qualityNameShort + "\n" +
+     "📦 FVG: " + fvgShortTxt + "\n" +
+     "📊 Volumen: " + volShortTxt + " (" + str.tostring(volRatio, "#.#") + "x)\n" +
+     "📉 RSI: " + str.tostring(rsiValue, "#.0") + "\n" +
+     "⏰ Kill Zone: " + kzName + "\n" +
+     "📈 Tendencia: " + trendName + "\n" +
+     "🔄 MTF " + mtfTF + ": " + mtfTrendName + "\n" +
+     "🎚️ Zona: " + zonaName + "\n" +
+     "📐 ATR: " + str.tostring(atrValue / pipValue, "#.#") + "p\n" +
+     "📏 VWAP: " + str.tostring(sessionVwap, "#.#####")
+
+// --- Alertas con filtros de calidad ---
+alertConfLong  = confLong >= alertMinConf
+alertConfShort = confShort >= alertMinConf
+alertKZFilter  = alertOnlyKZ ? inAnyKZ : true
+alertQualLong  = alertOnlyStrong ? qualityLong >= 2 : true
+alertQualShort = alertOnlyStrong ? qualityShort >= 2 : true
+
+if enableAlerts and longSignal and alertConfLong and alertKZFilter and alertQualLong
+    alert(longMessage, alert.freq_once_per_bar_close)
+
+if enableAlerts and shortSignal and alertConfShort and alertKZFilter and alertQualShort
+    alert(shortMessage, alert.freq_once_per_bar_close)
+
+if enableAlerts and alertOnCHoCH and choch_bull_c
+    alert("⚡ CHoCH ALCISTA EURUSD @ " + str.tostring(close, "#.#####") + " | KZ: " + kzName + " | Vol: " + str.tostring(volRatio, "#.#") + "x", alert.freq_once_per_bar_close)
+
+if enableAlerts and alertOnCHoCH and choch_bear_c
+    alert("⚡ CHoCH BAJISTA EURUSD @ " + str.tostring(close, "#.#####") + " | KZ: " + kzName + " | Vol: " + str.tostring(volRatio, "#.#") + "x", alert.freq_once_per_bar_close)
+
+if enableAlerts and alertOnBOS and bos_bull_c
+    alert("📈 BOS ALCISTA EURUSD @ " + str.tostring(close, "#.#####") + " | KZ: " + kzName, alert.freq_once_per_bar_close)
+
+if enableAlerts and alertOnBOS and bos_bear_c
+    alert("📉 BOS BAJISTA EURUSD @ " + str.tostring(close, "#.#####") + " | KZ: " + kzName, alert.freq_once_per_bar_close)
+
+if enableAlerts and alertOnSweeps and showSweepHLabel
+    alert("💧 SWEEP HIGHS EURUSD @ " + str.tostring(close, "#.#####") + " - Posible SHORT | KZ: " + kzName + " | Vol: " + str.tostring(volRatio, "#.#") + "x", alert.freq_once_per_bar_close)
+
+if enableAlerts and alertOnSweeps and showSweepLLabel
+    alert("💧 SWEEP LOWS EURUSD @ " + str.tostring(close, "#.#####") + " - Posible LONG | KZ: " + kzName + " | Vol: " + str.tostring(volRatio, "#.#") + "x", alert.freq_once_per_bar_close)
+
+// ============================================================================
+// ALERTCONDITIONS
+// ============================================================================
+
+alertcondition(longSignal, title="LONG Signal", message="LONG EURUSD v7.2")
+alertcondition(shortSignal, title="SHORT Signal", message="SHORT EURUSD v7.2")
+alertcondition(longSignal and qualityLong >= 2, title="LONG STRONG+", message="LONG STRONG EURUSD v7.2")
+alertcondition(shortSignal and qualityShort >= 2, title="SHORT STRONG+", message="SHORT STRONG EURUSD v7.2")
+alertcondition(longSignal and qualityLong >= 3, title="LONG PREMIUM", message="LONG PREMIUM EURUSD v7.2")
+alertcondition(shortSignal and qualityShort >= 3, title="SHORT PREMIUM", message="SHORT PREMIUM EURUSD v7.2")
+alertcondition(choch_bull_c, title="CHoCH BULL", message="CHoCH Alcista EURUSD")
+alertcondition(choch_bear_c, title="CHoCH BEAR", message="CHoCH Bajista EURUSD")
+alertcondition(bos_bull_c, title="BOS BULL", message="BOS Alcista EURUSD")
+alertcondition(bos_bear_c, title="BOS BEAR", message="BOS Bajista EURUSD")
+alertcondition(showSweepHLabel, title="SWEEP HIGH", message="Sweep Highs EURUSD")
+alertcondition(showSweepLLabel, title="SWEEP LOW", message="Sweep Lows EURUSD")
